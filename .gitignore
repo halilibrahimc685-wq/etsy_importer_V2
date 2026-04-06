@@ -1,0 +1,9 @@
+.env
+.env.*
+.env.save
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+drafts/*.json
