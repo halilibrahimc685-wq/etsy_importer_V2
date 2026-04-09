@@ -722,7 +722,7 @@ def parse_rendered_html(html: str, source_url: str, extra_jsons: Optional[list[A
     )
 
 
-def scrape_with_playwright(url: str, headless: bool = True, wait_ms: int = 5000) -> ScrapedListing:
+def scrape_with_playwright(url: str, headless: bool = True, wait_ms: int = 2000) -> ScrapedListing:
     from playwright.sync_api import sync_playwright
 
     captured_jsons: list[Any] = []
@@ -747,6 +747,7 @@ def scrape_with_playwright(url: str, headless: bool = True, wait_ms: int = 5000)
 
         page.on("response", on_response)
         page.goto(url, wait_until="domcontentloaded", timeout=120_000)
+        # Kısa bekleme: twister / dinamik içerik. 5s genelde gereksiz; eksik veri olursa artırın.
         page.wait_for_timeout(wait_ms)
         html = page.content()
         browser.close()

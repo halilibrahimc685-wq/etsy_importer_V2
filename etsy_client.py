@@ -173,6 +173,39 @@ def normalize_listing_who_when_supply(
     return who, when, is_supply, note
 
 
+def list_shop_shipping_profiles(
+    shop_id: Optional[int] = None,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """
+    Mağazanın Etsy shipping profile kayıtlarını listeler.
+    GET https://api.etsy.com/v3/application/shops/{shop_id}/shipping-profiles
+    """
+    sid = shop_id if shop_id is not None else _env_int("ETSY_SHOP_ID", required=True)
+    url = f"{ETSY_API}/application/shops/{sid}/shipping-profiles"
+    params: dict[str, str] = {}
+    if limit >= 0:
+        params["limit"] = str(min(limit, 100))
+    if offset > 0:
+        params["offset"] = str(offset)
+    with httpx.Client(timeout=60.0) as client:
+        r = _client_request(
+            client,
+            "GET",
+            url,
+            headers=_headers_json(),
+            params=params or None,
+        )
+    if r.status_code >= 400:
+        raise RuntimeError(f"Etsy shipping profiles {r.status_code}: {r.text}")
+    data = r.json()
+    if isinstance(data, dict) and isinstance(data.get("results"), list):
+        return [x for x in data["results"] if isinstance(x, dict)]
+    return []
+
+
 def create_draft_listing(
     *,
     shop_id: Optional[int] = None,
@@ -269,12 +302,32 @@ def update_existing_listing(
 
 
 def delete_listing(listing_id: int, shop_id: Optional[int] = None) -> None:
-    """Etsy listing'i siler (draft dahil)."""
-    sid = shop_id if shop_id is not None else _env_int("ETSY_SHOP_ID", required=True)
-    url = f"{ETSY_API}/application/shops/{sid}/listings/{listing_id}"
+    """
+    Etsy listing'i siler (draft dahil).
+
+    Etsy Open API v3: ``DELETE /application/listings/{listing_id}``.
+    Gerekli OAuth scope: ``listings_d`` (ayrıca okuma/yazma için ``listings_r``, ``listings_w``).
+
+    Shop önekli yol bu işlemde 404 Resource not found verebiliyor.
+    204 veya 404 (listing zaten yok) başarı sayılır.
+    """
+    _ = shop_id  # Eski imza uyumu; endpoint shop_id kullanmıyor.
+    url = f"{ETSY_API}/application/listings/{listing_id}"
     with httpx.Client(timeout=60.0) as client:
         r = _client_request(client, "DELETE", url, headers=_headers_json())
+    if r.status_code in (204, 404):
+        return
     if r.status_code >= 400:
+        body = (r.text or "").lower()
+        if r.status_code == 403 and "listings_d" in body:
+            raise RuntimeError(
+                "Etsy access token'da listing silme izni yok (listings_d). "
+                "developers.etsy.com → uygulamanız → API scopes içinde "
+                "listings_d (ve genelde listings_r, listings_w) açın; "
+                "satıcı hesabıyla OAuth yetkilendirmesini bu scope'larla yeniden yapın "
+                "ve .env içindeki ETSY_ACCESS_TOKEN / ETSY_REFRESH_TOKEN değerlerini güncelleyin. "
+                f"Yanıt: {r.text}"
+            )
         raise RuntimeError(f"Etsy delete listing {r.status_code}: {r.text}")
 
 

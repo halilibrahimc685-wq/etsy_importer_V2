@@ -7,6 +7,7 @@ import argparse
 import json
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -55,7 +56,25 @@ def _validate_amazon_url(url: str) -> None:
         raise RuntimeError("Bu sürüm yalnızca Amazon ürün URL'leri için yapılandırıldı.")
 
 
-def _augment_images_with_color_variants(draft: dict[str, object]) -> None:
+def _gallery_urls_for_asin(asin: str) -> list[str]:
+    try:
+        html = fetch_html_simple(f"https://www.amazon.com/dp/{asin}")
+        soup = BeautifulSoup(html, "lxml")
+        out: list[str] = []
+        for u in collect_listing_image_urls(soup, html):
+            if isinstance(u, str) and u.strip():
+                out.append(u.strip())
+        return out
+    except Exception:
+        return []
+
+
+def _augment_images_with_color_variants(
+    draft: dict[str, object],
+    *,
+    max_extra_asins: int = 0,
+    max_workers: int = 8,
+) -> None:
     debug = draft.get("debug")
     if not isinstance(debug, dict):
         return
@@ -68,27 +87,36 @@ def _augment_images_with_color_variants(draft: dict[str, object]) -> None:
         images = []
         draft["images"] = images
 
-    seen: set[str] = {str(x).strip() for x in images if isinstance(x, str)}
+    seen: set[str] = {str(x).strip() for x in images if isinstance(x, str) and str(x).strip()}
     base_asin = ""
     src = draft.get("source")
     if isinstance(src, dict) and src.get("item_id"):
         base_asin = str(src["item_id"]).strip().upper()
 
+    asins_ordered: list[str] = []
+    seen_asin: set[str] = set()
     for _, asin in color_asin_map.items():
         asin_s = str(asin).strip().upper()
         if not re.fullmatch(r"[A-Z0-9]{10}", asin_s):
             continue
         if base_asin and asin_s == base_asin:
             continue
-        try:
-            html = fetch_html_simple(f"https://www.amazon.com/dp/{asin_s}")
-            soup = BeautifulSoup(html, "lxml")
-            for u in collect_listing_image_urls(soup, html):
-                if u and u not in seen:
+        if asin_s not in seen_asin:
+            seen_asin.add(asin_s)
+            asins_ordered.append(asin_s)
+
+    if max_extra_asins > 0:
+        asins_ordered = asins_ordered[:max_extra_asins]
+    if not asins_ordered:
+        return
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(asins_ordered))) as pool:
+        futures = {pool.submit(_gallery_urls_for_asin, a): a for a in asins_ordered}
+        for fut in as_completed(futures):
+            for u in fut.result():
+                if u not in seen:
                     images.append(u)
                     seen.add(u)
-        except Exception:
-            continue
 
 
 def _upload_images_best_effort(listing_id: int, images: list[str]) -> None:
@@ -268,6 +296,10 @@ def main() -> int:
             )
             if mp_note:
                 print(mp_note, file=sys.stderr)
+            ship_kw: dict = {}
+            ship_raw = str(meta.get("shipping_profile_id") or "").strip()
+            if ship_raw.isdigit():
+                ship_kw["shipping_profile_id"] = int(ship_raw)
             result = create_draft_listing(
                 title=draft["title"],
                 description=desc[:49990],
@@ -276,6 +308,7 @@ def main() -> int:
                 who_made=who,
                 when_made=when,
                 is_supply=is_sup,
+                **ship_kw,
             )
             listing_id = result.get("listing_id")
             print("Etsy draft listing_id:", listing_id)

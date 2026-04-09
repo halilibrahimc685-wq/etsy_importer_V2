@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -15,6 +16,7 @@ from fastapi.templating import Jinja2Templates
 from etsy_client import (
     create_draft_listing,
     delete_listing,
+    list_shop_shipping_profiles,
     normalize_listing_who_when_supply,
     update_existing_listing,
     update_listing_inventory,
@@ -27,6 +29,11 @@ load_dotenv()
 
 app = FastAPI(title="Amazon -> Etsy Importer")
 templates = Jinja2Templates(directory="templates")
+
+# Etsy shipping listesi her tam sayfa render'da API'yi vurmaması için kısa önbellek.
+_SHIP_PROF_CACHE_TTL_SEC = 120.0
+_ship_prof_cache_mono: float = 0.0
+_ship_prof_cache_value: Optional[tuple[list[dict[str, Any]], Optional[str]]] = None
 APP_DRAFTS_FILE = Path("drafts") / "app_draft_listings.json"
 PRESETS_FILE = Path("drafts") / "variation_presets.json"
 CATEGORY_TAXONOMY_MAP = {
@@ -59,6 +66,7 @@ DEFAULT_VARIATION_PRESETS: dict[str, Any] = {
                 "Baby Onesie 12 - 18 Mos.",
                 "Baby Onesie 18 - 24 Mos.",
             ],
+            "prices": [],
         },
         "type2": {
             "name": "Color",
@@ -106,6 +114,7 @@ DEFAULT_VARIATION_PRESETS: dict[str, Any] = {
                 "Youth Hoodie - L",
                 "Youth Hoodie - XL",
             ],
+            "prices": [],
         },
         "type2": {
             "name": "Color",
@@ -155,6 +164,7 @@ DEFAULT_VARIATION_PRESETS: dict[str, Any] = {
                 "CC Unisex Sweatshirt - 2XL",
                 "CC Unisex Sweatshirt - 3XL",
             ],
+            "prices": [],
         },
         "type2": {
             "name": "Color",
@@ -226,12 +236,11 @@ def _apply_variations(listing_id: int, draft: dict[str, Any], price: str) -> Opt
             "Etsy Satıcı Paneli → Shop Manager’da readiness/shipping ayarlarınızdan doğrulanabilir)."
         )
 
-    offering = {
-        "price": float(price),
-        "quantity": 1,
-        "is_enabled": True,
-        "readiness_state_id": readiness_state_id,
-    }
+    meta_v = draft.get("workspace_meta")
+    preset_key = "custom"
+    if isinstance(meta_v, dict):
+        preset_key = str(meta_v.get("variation_preset") or "custom").strip()
+
     products = []
     for combo in combos:
         prop_values = []
@@ -243,6 +252,13 @@ def _apply_variations(listing_id: int, draft: dict[str, Any], price: str) -> Opt
                     "values": [val],
                 }
             )
+        offering_price = _offering_price_for_combo(combo, names, preset_key, price)
+        offering = {
+            "price": offering_price,
+            "quantity": 1,
+            "is_enabled": True,
+            "readiness_state_id": readiness_state_id,
+        }
         products.append(
             {
                 "sku": "",
@@ -400,28 +416,146 @@ def _load_variation_presets() -> dict[str, Any]:
                     opts = [str(x).strip() for x in val[part]["options"] if str(x).strip()]
                     if opts:
                         merged[key][part]["options"] = opts
+                if isinstance(val[part].get("prices"), list):
+                    merged[key][part]["prices"] = [
+                        str(x).strip() for x in val[part]["prices"]
+                    ]
+    for block in merged.values():
+        if not isinstance(block, dict):
+            continue
+        for part in ("type1", "type2"):
+            p = block.get(part)
+            if isinstance(p, dict) and "prices" not in p:
+                p["prices"] = []
     return merged
 
 
-def _save_variation_presets_from_form(form: dict[str, str]) -> None:
-    def _opts(name: str) -> list[str]:
-        raw = str(form.get(name) or "")
-        out: list[str] = []
-        seen: set[str] = set()
-        for line in raw.splitlines():
-            v = line.strip()
-            if not v:
-                continue
-            if v not in seen:
-                seen.add(v)
-                out.append(v)
-        return out
+def _preset_type1_price_by_option(preset_key: str, base_price: str) -> dict[str, float]:
+    """Birincil seçenek (genelde beden) metni -> Etsy offering fiyatı."""
+    base_s = (base_price or "19.99").strip() or "19.99"
+    try:
+        base_f = float(base_s)
+    except ValueError:
+        base_f = 19.99
+    raw = _load_variation_presets().get(preset_key)
+    if not isinstance(raw, dict):
+        return {}
+    t1 = raw.get("type1")
+    if not isinstance(t1, dict):
+        return {}
+    opts = t1.get("options")
+    if not isinstance(opts, list):
+        return {}
+    plist = t1.get("prices")
+    price_lines: list[str] = (
+        [str(x).strip() for x in plist] if isinstance(plist, list) else []
+    )
+    out: dict[str, float] = {}
+    for i, opt in enumerate(opts):
+        o = str(opt).strip()
+        if not o:
+            continue
+        cell = price_lines[i] if i < len(price_lines) else ""
+        use_s = cell if cell else base_s
+        try:
+            out[o] = float(use_s)
+        except ValueError:
+            out[o] = base_f
+    return out
 
+
+def _offering_price_for_combo(
+    combo: list[str],
+    dim_names: list[str],
+    preset_key: str,
+    base_price: str,
+) -> float:
+    base_s = (base_price or "19.99").strip() or "19.99"
+    try:
+        base_f = float(base_s)
+    except ValueError:
+        base_f = 19.99
+    if preset_key not in ("shirt", "sweatshirt", "comfort_colors"):
+        return base_f
+    presets_block = _load_variation_presets().get(preset_key)
+    if not isinstance(presets_block, dict):
+        return base_f
+    t1 = presets_block.get("type1")
+    if not isinstance(t1, dict):
+        return base_f
+    t1_name = str(t1.get("name") or "Size").strip().lower()
+    price_by_opt = _preset_type1_price_by_option(preset_key, base_price)
+    if not price_by_opt:
+        return base_f
+    idx = -1
+    for i, n in enumerate(dim_names):
+        if str(n).strip().lower() == t1_name:
+            idx = i
+            break
+    if idx < 0:
+        idx = 0
+    if idx >= len(combo):
+        return base_f
+    val = combo[idx]
+    return price_by_opt.get(val.strip(), base_f)
+
+
+def _opts_from_multivalue(form: dict[str, Any], key: str) -> list[str]:
+    """Formdan aynı isimli alanların listesi; boş ve yinelenenleri atlar (sıra korunur)."""
+    raw = form.get(key) or []
+    if not isinstance(raw, list):
+        raw = [raw]
+    out: list[str] = []
+    seen: set[str] = set()
+    for x in raw:
+        v = str(x).strip()
+        if not v or v in seen:
+            continue
+        seen.add(v)
+        out.append(v)
+    return out
+
+
+def _type1_opts_prices_from_form(
+    form: dict[str, Any], opt_key: str, price_key: str
+) -> tuple[list[str], list[str]]:
+    olist = form.get(opt_key) or []
+    plist = form.get(price_key) or []
+    if not isinstance(olist, list):
+        olist = [str(olist).strip()] if str(olist).strip() else []
+    else:
+        olist = [str(x).strip() for x in olist]
+    if not isinstance(plist, list):
+        plist = [str(plist).strip()] if str(plist).strip() else []
+    else:
+        plist = [str(x).strip() for x in plist]
+    opts_out: list[str] = []
+    prices_out: list[str] = []
+    n = max(len(olist), len(plist))
+    for i in range(n):
+        o = olist[i] if i < len(olist) else ""
+        p = plist[i] if i < len(plist) else ""
+        if not o:
+            continue
+        opts_out.append(o)
+        prices_out.append(p)
+    return opts_out, prices_out
+
+
+def _save_variation_presets_from_form(form: dict[str, Any]) -> None:
     presets = _load_variation_presets()
+
     presets["shirt"]["type1"]["name"] = str(form.get("shirt_type1_name") or "Size").strip() or "Size"
     presets["shirt"]["type2"]["name"] = str(form.get("shirt_type2_name") or "Color").strip() or "Color"
-    presets["shirt"]["type1"]["options"] = _opts("shirt_type1_options") or presets["shirt"]["type1"]["options"]
-    presets["shirt"]["type2"]["options"] = _opts("shirt_type2_options") or presets["shirt"]["type2"]["options"]
+    so, sp = _type1_opts_prices_from_form(form, "shirt_type1_opts", "shirt_type1_opt_prices")
+    if so:
+        presets["shirt"]["type1"]["options"] = so
+        while len(sp) < len(so):
+            sp.append("")
+        presets["shirt"]["type1"]["prices"] = sp[: len(so)]
+    opts2 = _opts_from_multivalue(form, "shirt_type2_opts")
+    if opts2:
+        presets["shirt"]["type2"]["options"] = opts2
 
     presets["sweatshirt"]["type1"]["name"] = (
         str(form.get("sweat_type1_name") or "Size").strip() or "Size"
@@ -429,12 +563,15 @@ def _save_variation_presets_from_form(form: dict[str, str]) -> None:
     presets["sweatshirt"]["type2"]["name"] = (
         str(form.get("sweat_type2_name") or "Color").strip() or "Color"
     )
-    presets["sweatshirt"]["type1"]["options"] = (
-        _opts("sweat_type1_options") or presets["sweatshirt"]["type1"]["options"]
-    )
-    presets["sweatshirt"]["type2"]["options"] = (
-        _opts("sweat_type2_options") or presets["sweatshirt"]["type2"]["options"]
-    )
+    wo, wp = _type1_opts_prices_from_form(form, "sweat_type1_opts", "sweat_type1_opt_prices")
+    if wo:
+        presets["sweatshirt"]["type1"]["options"] = wo
+        while len(wp) < len(wo):
+            wp.append("")
+        presets["sweatshirt"]["type1"]["prices"] = wp[: len(wo)]
+    w2 = _opts_from_multivalue(form, "sweat_type2_opts")
+    if w2:
+        presets["sweatshirt"]["type2"]["options"] = w2
 
     presets["comfort_colors"]["type1"]["name"] = (
         str(form.get("cc_type1_name") or "Size").strip() or "Size"
@@ -442,12 +579,15 @@ def _save_variation_presets_from_form(form: dict[str, str]) -> None:
     presets["comfort_colors"]["type2"]["name"] = (
         str(form.get("cc_type2_name") or "Color").strip() or "Color"
     )
-    presets["comfort_colors"]["type1"]["options"] = (
-        _opts("cc_type1_options") or presets["comfort_colors"]["type1"]["options"]
-    )
-    presets["comfort_colors"]["type2"]["options"] = (
-        _opts("cc_type2_options") or presets["comfort_colors"]["type2"]["options"]
-    )
+    co, cp = _type1_opts_prices_from_form(form, "cc_type1_opts", "cc_type1_opt_prices")
+    if co:
+        presets["comfort_colors"]["type1"]["options"] = co
+        while len(cp) < len(co):
+            cp.append("")
+        presets["comfort_colors"]["type1"]["prices"] = cp[: len(co)]
+    c2 = _opts_from_multivalue(form, "cc_type2_opts")
+    if c2:
+        presets["comfort_colors"]["type2"]["options"] = c2
 
     PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
     PRESETS_FILE.write_text(json.dumps(presets, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -467,15 +607,57 @@ def _draft_listing_create_args(draft: dict[str, Any]) -> tuple[dict[str, Any], s
     )
     cat_key = str(meta.get("category_taxonomy") or "tshirts").strip().lower()
     taxonomy_id = CATEGORY_TAXONOMY_MAP.get(cat_key, CATEGORY_TAXONOMY_MAP["tshirts"])
-    return (
-        {
-            "who_made": who,
-            "when_made": when,
-            "is_supply": is_supply,
-            "taxonomy_id": taxonomy_id,
-        },
-        note,
-    )
+    opts: dict[str, Any] = {
+        "who_made": who,
+        "when_made": when,
+        "is_supply": is_supply,
+        "taxonomy_id": taxonomy_id,
+    }
+    ship_s = str(meta.get("shipping_profile_id") or "").strip()
+    if ship_s.isdigit():
+        opts["shipping_profile_id"] = int(ship_s)
+    return opts, note
+
+
+def _normalize_shipping_profiles_for_ui(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for p in raw:
+        pid = p.get("shipping_profile_id")
+        if pid is None:
+            pid = p.get("profile_id")
+        if pid is None:
+            continue
+        try:
+            pid_i = int(pid)
+        except (TypeError, ValueError):
+            continue
+        if p.get("is_deleted") is True:
+            continue
+        title = str(p.get("title") or p.get("name") or f"Profile {pid_i}")
+        rows.append({"id": pid_i, "title": title})
+    rows.sort(key=lambda x: (x["title"].lower(), x["id"]))
+    return rows
+
+
+def _etsy_shipping_profiles_display() -> tuple[list[dict[str, Any]], Optional[str]]:
+    global _ship_prof_cache_mono, _ship_prof_cache_value
+    now = time.monotonic()
+    if (
+        _ship_prof_cache_value is not None
+        and now - _ship_prof_cache_mono < _SHIP_PROF_CACHE_TTL_SEC
+    ):
+        return _ship_prof_cache_value
+    try:
+        raw = list_shop_shipping_profiles()
+        out: tuple[list[dict[str, Any]], Optional[str]] = (
+            _normalize_shipping_profiles_for_ui(raw),
+            None,
+        )
+    except Exception as exc:
+        out = ([], str(exc))
+    _ship_prof_cache_value = out
+    _ship_prof_cache_mono = now
+    return out
 
 
 def _workspace_ui(draft: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -491,6 +673,7 @@ def _workspace_ui(draft: Optional[dict[str, Any]]) -> dict[str, Any]:
         "quantity": "1",
         "variation_preset": "custom",
         "category_taxonomy": "tshirts",
+        "shipping_profile_id": "",
     }
     if not draft:
         return {
@@ -561,6 +744,7 @@ def _workspace_ui(draft: Optional[dict[str, Any]]) -> dict[str, Any]:
         "quantity": str(meta.get("quantity") or "1"),
         "variation_preset": str(meta.get("variation_preset") or "custom"),
         "category_taxonomy": str(meta.get("category_taxonomy") or "tshirts"),
+        "shipping_profile_id": str(meta.get("shipping_profile_id") or "").strip(),
     }
 
 
@@ -595,6 +779,16 @@ def _render_index(
         workspace_draft_json = "{}"
     ws = _workspace_ui(workspace_draft)
     variation_presets = _load_variation_presets()
+    variation_presets_json = json.dumps(variation_presets, ensure_ascii=False)
+    etsy_shipping_profiles, etsy_shipping_profiles_error = _etsy_shipping_profiles_display()
+    ws_ship_sel = str(ws.get("shipping_profile_id") or "").strip()
+    if ws_ship_sel.isdigit():
+        sid_i = int(ws_ship_sel)
+        if not any(p["id"] == sid_i for p in etsy_shipping_profiles):
+            etsy_shipping_profiles = list(etsy_shipping_profiles) + [
+                {"id": sid_i, "title": f"Taslak / .env ({sid_i})"}
+            ]
+            etsy_shipping_profiles.sort(key=lambda x: (str(x["title"]).lower(), x["id"]))
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -611,6 +805,9 @@ def _render_index(
             "ws": ws,
             "app_draft_listings": _load_app_draft_listings(),
             "variation_presets": variation_presets,
+            "variation_presets_json": variation_presets_json,
+            "etsy_shipping_profiles": etsy_shipping_profiles,
+            "etsy_shipping_profiles_error": etsy_shipping_profiles_error,
             "active_tab": active_tab,
         },
     )
@@ -664,6 +861,8 @@ def drafts_open(request: Request, listing_id: int = Form(...)) -> HTMLResponse:
                 "sku": "",
                 "quantity": "1",
                 "variation_preset": "custom",
+                "category_taxonomy": "tshirts",
+                "shipping_profile_id": "",
             },
         }
 
@@ -702,38 +901,31 @@ def drafts_delete(request: Request, listing_id: int = Form(...)) -> HTMLResponse
 
 
 @app.post("/presets/save", response_class=HTMLResponse)
-def presets_save(
-    request: Request,
-    shirt_type1_name: str = Form("Size"),
-    shirt_type1_options: str = Form(""),
-    shirt_type2_name: str = Form("Color"),
-    shirt_type2_options: str = Form(""),
-    sweat_type1_name: str = Form("Size"),
-    sweat_type1_options: str = Form(""),
-    sweat_type2_name: str = Form("Color"),
-    sweat_type2_options: str = Form(""),
-    cc_type1_name: str = Form("Size"),
-    cc_type1_options: str = Form(""),
-    cc_type2_name: str = Form("Color"),
-    cc_type2_options: str = Form(""),
-) -> HTMLResponse:
+async def presets_save(request: Request) -> HTMLResponse:
+    form_in = await request.form()
+
+    def _gl(name: str) -> list[str]:
+        return [str(v).strip() for v in form_in.getlist(name)]
+
+    payload: dict[str, Any] = {
+        "shirt_type1_name": str(form_in.get("shirt_type1_name") or "Size"),
+        "shirt_type2_name": str(form_in.get("shirt_type2_name") or "Color"),
+        "shirt_type2_opts": _gl("shirt_type2_opts"),
+        "shirt_type1_opts": _gl("shirt_type1_opts"),
+        "shirt_type1_opt_prices": _gl("shirt_type1_opt_prices"),
+        "sweat_type1_name": str(form_in.get("sweat_type1_name") or "Size"),
+        "sweat_type2_name": str(form_in.get("sweat_type2_name") or "Color"),
+        "sweat_type2_opts": _gl("sweat_type2_opts"),
+        "sweat_type1_opts": _gl("sweat_type1_opts"),
+        "sweat_type1_opt_prices": _gl("sweat_type1_opt_prices"),
+        "cc_type1_name": str(form_in.get("cc_type1_name") or "Size"),
+        "cc_type2_name": str(form_in.get("cc_type2_name") or "Color"),
+        "cc_type2_opts": _gl("cc_type2_opts"),
+        "cc_type1_opts": _gl("cc_type1_opts"),
+        "cc_type1_opt_prices": _gl("cc_type1_opt_prices"),
+    }
     try:
-        _save_variation_presets_from_form(
-            {
-                "shirt_type1_name": shirt_type1_name,
-                "shirt_type1_options": shirt_type1_options,
-                "shirt_type2_name": shirt_type2_name,
-                "shirt_type2_options": shirt_type2_options,
-                "sweat_type1_name": sweat_type1_name,
-                "sweat_type1_options": sweat_type1_options,
-                "sweat_type2_name": sweat_type2_name,
-                "sweat_type2_options": sweat_type2_options,
-                "cc_type1_name": cc_type1_name,
-                "cc_type1_options": cc_type1_options,
-                "cc_type2_name": cc_type2_name,
-                "cc_type2_options": cc_type2_options,
-            }
-        )
+        _save_variation_presets_from_form(payload)
         return _render_index(request, active_tab="presets", status="Presetler kaydedildi.")
     except Exception as exc:
         return _render_index(request, active_tab="presets", error=str(exc))
@@ -769,6 +961,7 @@ def workspace_scrape(
                 "quantity": "1",
                 "variation_preset": "custom",
                 "category_taxonomy": "tshirts",
+                "shipping_profile_id": "",
             }
         return _render_index(
             request,
@@ -810,6 +1003,14 @@ def workspace_publish(
             status = f"Etsy listing güncellendi: {listing_id}"
             _save_app_draft_listing(listing_id=listing_id, draft=draft, price=price, mode="update")
         else:
+            wm_pub = draft.get("workspace_meta")
+            if not isinstance(wm_pub, dict):
+                wm_pub = {}
+            ship_pub = str(wm_pub.get("shipping_profile_id") or "").strip()
+            if not ship_pub.isdigit():
+                raise RuntimeError(
+                    "Yeni Etsy taslağı için Shipping & processing altında bir shipping profile seçin."
+                )
             listing_opts, mp_note = _draft_listing_create_args(draft)
             result = create_draft_listing(
                 title=str(draft.get("title") or "")[:140],

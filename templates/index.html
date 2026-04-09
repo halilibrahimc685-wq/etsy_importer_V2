@@ -59,6 +59,14 @@
         letter-spacing: -0.02em;
         border-bottom: 1px solid rgba(255, 255, 255, 0.08);
         margin-bottom: 8px;
+        display: block;
+        text-decoration: none;
+        color: #e8eaed;
+        transition: opacity 0.15s;
+      }
+
+      .sidebar-brand:hover {
+        opacity: 0.9;
       }
 
       .sidebar-brand span { color: var(--accent); opacity: 0.95; }
@@ -669,9 +677,6 @@
         color: var(--text-muted);
         font-size: 0.95rem;
       }
-      details.ws-adv summary { cursor: pointer; font-weight: 600; font-size: 0.88rem; margin-bottom: 8px; }
-      .ws-adv textarea { min-height: 160px; font-size: 0.75rem; }
-
       .tab-page { max-width: 1100px; }
       .drafts-table-wrap { overflow-x: auto; margin-top: 8px; }
       .drafts-table {
@@ -725,14 +730,101 @@
         border-radius: 8px;
         border: 1px solid var(--border);
       }
-      .preset-block .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
-      @media (max-width: 720px) { .preset-block .row2 { grid-template-columns: 1fr; } }
+      .preset-block .preset-size-cols input[type="text"],
+      .preset-block .preset-body-cols input[type="text"],
+      .preset-block .preset-body-cols input[type="number"] {
+        max-width: none;
+        width: 100%;
+        box-sizing: border-box;
+      }
+      .preset-block .preset-price-wrap input[type="number"] {
+        width: auto;
+      }
+      .preset-size-cols,
+      .preset-body-cols {
+        --preset-color: minmax(140px, 1fr);
+        --preset-price: minmax(96px, 120px);
+        display: grid;
+        grid-template-columns: 1fr var(--preset-price) var(--preset-color);
+        gap: 8px 12px;
+        align-items: start;
+        margin-bottom: 12px;
+        max-width: 920px;
+      }
+      .pbc-col {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        min-width: 0;
+      }
+      .preset-field-line {
+        display: flex;
+        align-items: center;
+        min-height: 38px;
+      }
+      .preset-field-line .preset-price-wrap {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--bg-page);
+        padding-left: 10px;
+        box-sizing: border-box;
+      }
+      .preset-currency {
+        flex-shrink: 0;
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: var(--text-muted);
+      }
+      .preset-price-wrap .preset-size-price {
+        flex: 1;
+        min-width: 0;
+        border: none !important;
+        background: transparent;
+        padding: 8px 10px 8px 4px;
+        border-radius: 0 8px 8px 0;
+        font-size: 0.85rem;
+        box-sizing: border-box;
+        -moz-appearance: textfield;
+      }
+      .preset-price-wrap .preset-size-price::-webkit-outer-spin-button,
+      .preset-price-wrap .preset-size-price::-webkit-inner-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
+      }
+      @media (max-width: 720px) {
+        .preset-size-cols,
+        .preset-body-cols {
+          grid-template-columns: 1fr;
+        }
+        .pbc-col .preset-size-price { max-width: none; }
+      }
+      .preset-size-head {
+        font-size: 0.8rem;
+        font-weight: 600;
+        color: var(--text-muted);
+      }
+      .preset-size-cols .preset-size-opt,
+      .preset-body-cols .preset-size-opt {
+        padding: 8px 10px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        font-size: 0.85rem;
+        min-width: 0;
+        width: 100%;
+        box-sizing: border-box;
+      }
+      .preset-add-row { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
     </style>
   </head>
   <body>
     <div class="app">
       <aside class="sidebar">
-        <div class="sidebar-brand">Etsy <span>Lab</span></div>
+        <a href="/" class="sidebar-brand">Etsy <span>Lab</span></a>
         <a href="/" class="nav-item {% if active_tab == 'workspace' %}active{% endif %}">
           <span class="nav-icon">✏️</span> Listing workspace
         </a>
@@ -784,9 +876,13 @@
               </form>
               <label class="check-row" style="margin:0;font-size:0.82rem;">
                 <input type="checkbox" name="no_playwright" form="ws-scrape-form" />
-                <span>HTTP only</span>
+                <span>HTTP only (Playwright yok — genelde daha hızlı, bazı sayfalarda veri eksik)</span>
               </label>
             </div>
+            <p class="hint" style="margin:0 0 14px;font-size:0.8rem;color:var(--text-muted);max-width:900px;">
+              Her listing yüklemesinde renk varyantları için ek Amazon istekleri (paralel) çalışır. Ek süre: tarayıcı (Playwright) + bu istekler;
+              ardından Etsy shipping profil listesi (yaklaşık 2&nbsp;dk önbellek).
+            </p>
 
             {% if not ws.has_draft %}
             <div class="card ws-empty">
@@ -802,6 +898,12 @@
                 <h3>{{ ws.title }}</h3>
                 <div class="price-line">{% if ws.price_display %}{{ ws.price_display }}{% else %}—{% endif %}</div>
                 <div class="shop">{{ etsy_shop_name }}</div>
+                {% if ws.source_url %}
+                <p style="margin:10px 0 0;font-size:0.82rem;line-height:1.4;">
+                  <a href="{{ ws.source_url|e }}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-weight:600;">Kaynak ürün</a>
+                  {% if ws.item_id %}<span style="color:var(--text-muted);"> · {{ ws.item_id|e }}</span>{% endif %}
+                </p>
+                {% endif %}
               </div>
             </div>
 
@@ -867,12 +969,12 @@
                     <div class="ws-label">Variation preset</div>
                     <div>
                       <select id="ws_variation_preset" style="width:100%;max-width:320px;padding:10px;border-radius:8px;border:1px solid var(--border);">
-                        <option value="custom" {% if ws.variation_preset == 'custom' %}selected{% endif %}>Özel (elle)</option>
+                        <option value="custom" {% if ws.variation_preset == 'custom' %}selected{% endif %}>Amazon</option>
                         <option value="shirt" {% if ws.variation_preset == 'shirt' %}selected{% endif %}>Shirt preset</option>
                         <option value="sweatshirt" {% if ws.variation_preset == 'sweatshirt' %}selected{% endif %}>Sweatshirt &amp; hoodie</option>
                         <option value="comfort_colors" {% if ws.variation_preset == 'comfort_colors' %}selected{% endif %}>Comfort Colors</option>
                       </select>
-                      <p class="hint" style="margin-top:8px;">Seçim taslakta saklanır; Etsy envanteri aşağıdaki varyasyon satırlarına göre güncellenir (Presets sekmesindeki listeleri buraya elle yansıtın).</p>
+                      <p class="hint" style="margin-top:8px;">Preset değişince aşağıdaki varyasyon satırları Presets sekmesindeki listeyle doldurulur. Amazon seçiminde sayfadan gelen (veya sıfırlama ile seed) varyasyon satırları kullanılır.</p>
                     </div>
                   </div>
                   <div class="ws-row">
@@ -889,6 +991,7 @@
                     <div class="ws-label">Etsy price</div>
                     <div>
                       <input type="text" name="price" id="ws_price" value="{{ workspace_price }}" style="max-width:200px;padding:10px;border-radius:8px;border:1px solid var(--border);" />
+                      <p class="hint" style="margin-top:8px;">Listing temel fiyatı (renkler için). Presets’te bir bedenin yanındaki <strong>fiyat kutusu</strong> boşsa o beden de bu tutarı kullanır (Shirt / Sweatshirt / Comfort Colors seçiliyken).</p>
                     </div>
                   </div>
                   <div class="ws-row">
@@ -1016,10 +1119,24 @@
               <div class="ws-section">
                 <div class="ws-section-head">Shipping &amp; processing</div>
                 <div class="ws-section-body">
-                  <p class="hint" style="margin:0;">
-                    Etsy’de <strong>shipping profile</strong>, <strong>processing</strong> ve <strong>return policy</strong> mağaza ayarlarından gelir.
-                    Bu araç şu an listing başlığı, açıklama, fiyat ve görselleri yazar; profil ID’leri <code>.env</code> içindeki değişkenlerle eşlenir.
-                  </p>
+                  <div class="ws-row">
+                    <div class="ws-label">Shipping profile</div>
+                    <div>
+                      <select id="ws_shipping_profile_id" style="width:100%;max-width:420px;padding:10px;border-radius:8px;border:1px solid var(--border);">
+                        <option value="" {% if not ws.shipping_profile_id %}selected{% endif %}>— Profil seçin —</option>
+                        {% for sp in etsy_shipping_profiles %}
+                        <option value="{{ sp.id }}" {% if ws.shipping_profile_id == (sp.id | string) %}selected{% endif %}>{{ sp.title|e }} — ID {{ sp.id }}</option>
+                        {% endfor %}
+                      </select>
+                      {% if etsy_shipping_profiles_error %}
+                      <p class="hint" style="margin-top:10px;color:var(--danger-text);"><strong>Profiller çekilemedi.</strong> {{ etsy_shipping_profiles_error|e }} Yeni taslak yayınlamak için listeden seçim yapılamaz; OAuth / ağı kontrol edin.</p>
+                      {% elif not etsy_shipping_profiles %}
+                      <p class="hint" style="margin-top:10px;">Etsy’den profil listesi boş. Yeni taslak için en az bir shipping profile görünmeli.</p>
+                      {% else %}
+                      <p class="hint" style="margin-top:10px;">Her yeni listing için buradan profil seçin. Güncelleme (mevcut listing ID ile) bu alanı zorunlu tutmaz.</p>
+                      {% endif %}
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -1035,13 +1152,6 @@
                 </div>
               </div>
 
-              <details class="ws-section ws-adv">
-                <summary>Gelişmiş — ham JSON</summary>
-                <div class="ws-section-body">
-                  <textarea id="ws_raw_json" readonly>{{ workspace_draft_json }}</textarea>
-                </div>
-              </details>
-
               <div class="ws-footer-bar">
                 <button type="button" class="btn btn-secondary" onclick="wsReset()">Reset</button>
                 <button type="submit" class="btn btn-primary">Publish to Etsy (draft)</button>
@@ -1049,6 +1159,7 @@
             </form>
 
             <script type="application/json" id="draft-seed">{{ workspace_draft_json | safe }}</script>
+            <script type="application/json" id="variation-presets-data">{{ variation_presets_json | safe }}</script>
             <script>
               (function () {
                 const seedEl = document.getElementById('draft-seed');
@@ -1319,6 +1430,37 @@
                   wsUpdateVarAddButtonState();
                 }
 
+                function wsGetVariationPresets() {
+                  const el = document.getElementById('variation-presets-data');
+                  if (!el) return {};
+                  try {
+                    return JSON.parse(el.textContent || '{}');
+                  } catch (e) {
+                    return {};
+                  }
+                }
+
+                function wsApplyVariationPreset(presetKey) {
+                  const box = document.getElementById('ws-variations-editor');
+                  if (!box) return;
+                  const key = (presetKey || 'custom').trim();
+                  if (key === 'custom') {
+                    wsRenderVariationsFromSeed();
+                    return;
+                  }
+                  const all = wsGetVariationPresets();
+                  const p = all[key];
+                  if (!p || typeof p !== 'object' || !p.type1 || !p.type2) return;
+                  const n1 = String(p.type1.name || 'Size');
+                  const n2 = String(p.type2.name || 'Color');
+                  const o1 = Array.isArray(p.type1.options) ? p.type1.options : [];
+                  const o2 = Array.isArray(p.type2.options) ? p.type2.options : [];
+                  box.innerHTML = '';
+                  box.appendChild(wsMakeVarDim(0, n1, o1));
+                  box.appendChild(wsMakeVarDim(1, n2, o2));
+                  wsUpdateVarAddButtonState();
+                }
+
                 function wsCollectVariations() {
                   const out = [];
                   document.querySelectorAll('#ws-variations-editor .ws-var-dim').forEach(function (el) {
@@ -1396,6 +1538,15 @@
                   document.querySelectorAll('#ws-variations-editor .ws-var-dim').forEach(wsBindVariationCardEvents);
                 }
 
+                const presetSel = document.getElementById('ws_variation_preset');
+                if (presetSel && varBox) {
+                  presetSel.addEventListener('change', function () {
+                    wsApplyVariationPreset(presetSel.value);
+                  });
+                  const initialPreset = (presetSel.value || 'custom').trim();
+                  if (initialPreset !== 'custom') wsApplyVariationPreset(initialPreset);
+                }
+
                 function titleCount() {
                   const t = document.getElementById('ws_title');
                   const c = document.getElementById('title-count');
@@ -1420,8 +1571,18 @@
                     const wm = s.workspace_meta && typeof s.workspace_meta === 'object' ? s.workspace_meta : {};
                     const cat = document.getElementById('ws_category_taxonomy');
                     if (cat && wm.category_taxonomy) cat.value = wm.category_taxonomy;
+                    const shipSel = document.getElementById('ws_shipping_profile_id');
+                    if (shipSel) {
+                      shipSel.value =
+                        wm.shipping_profile_id != null && String(wm.shipping_profile_id) !== ''
+                          ? String(wm.shipping_profile_id)
+                          : '';
+                    }
+                    const vp = document.getElementById('ws_variation_preset');
+                    if (vp && wm.variation_preset) vp.value = wm.variation_preset;
                     wsRenderPhotosFromSeed();
-                    wsRenderVariationsFromSeed();
+                    if (vp && vp.value && vp.value !== 'custom') wsApplyVariationPreset(vp.value);
+                    else wsRenderVariationsFromSeed();
                     titleCount();
                   } catch (e) {}
                 };
@@ -1445,6 +1606,8 @@
                   d.workspace_meta.quantity = (document.getElementById('ws_qty') && document.getElementById('ws_qty').value) || '1';
                   d.workspace_meta.section = (document.getElementById('ws_section') && document.getElementById('ws_section').value) || '';
                   d.workspace_meta.category_taxonomy = (document.getElementById('ws_category_taxonomy') && document.getElementById('ws_category_taxonomy').value) || 'tshirts';
+                  const shipEl = document.getElementById('ws_shipping_profile_id');
+                  d.workspace_meta.shipping_profile_id = shipEl && shipEl.value ? shipEl.value : '';
                   const r = document.querySelector('input[name=ws_renewal]:checked');
                   d.workspace_meta.renewal = r ? r.value : 'manual';
                   const lt = document.querySelector('input[name=ws_ltype]:checked');
@@ -1468,7 +1631,6 @@
                   <th>Başlık</th>
                   <th>Listing ID</th>
                   <th>Fiyat</th>
-                  <th>Kaynak</th>
                   <th>İşlem</th>
                 </tr>
               </thead>
@@ -1483,7 +1645,6 @@
                   <td>{{ row.title|e }}</td>
                   <td>{{ row.listing_id }}</td>
                   <td>{{ row.price|e }}</td>
-                  <td style="max-width:220px;word-break:break-all;font-size:0.82rem;">{{ (row.amazon_url or row.source_url or '')|e }}</td>
                   <td>
                     <div class="draft-actions">
                       <form method="post" action="/drafts/open">
@@ -1499,74 +1660,140 @@
                 </tr>
                 {% else %}
                 <tr>
-                  <td colspan="6" style="text-align:center;color:var(--text-muted);padding:28px;">Henüz kayıtlı draft yok. Workspace’te yayınladığınız listing’ler burada listelenir.</td>
+                  <td colspan="5" style="text-align:center;color:var(--text-muted);padding:28px;">Henüz kayıtlı draft yok. Workspace’te yayınladığınız listing’ler burada listelenir.</td>
                 </tr>
                 {% endfor %}
               </tbody>
             </table>
           </div>
           {% elif active_tab == 'presets' %}
+          {% macro preset_data_body(pfx, options, prices, colors) -%}
+          {% set pr = prices or [] %}
+          {% set op = options if options and options|length > 0 else [''] %}
+          {% set co = colors if colors and colors|length > 0 else [''] %}
+          <div class="preset-body-cols">
+            <div class="pbc-col" id="{{ pfx }}-col-size">
+              {% for o in op %}
+              <div class="preset-field-line">
+                <input type="text" class="preset-size-opt" name="{{ pfx }}_type1_opts" value="{{ o|e }}" placeholder="Beden / stil" autocomplete="off" />
+              </div>
+              {% endfor %}
+            </div>
+            <div class="pbc-col" id="{{ pfx }}-col-price">
+              {% for o in op %}
+              <div class="preset-field-line">
+                <div class="preset-price-wrap">
+                  <span class="preset-currency">$</span>
+                  <input type="number" class="preset-size-price" name="{{ pfx }}_type1_opt_prices" value="{% if loop.index0 < pr|length %}{{ pr[loop.index0]|e }}{% endif %}" placeholder="0.00" step="0.01" min="0" inputmode="decimal" autocomplete="off" />
+                </div>
+              </div>
+              {% endfor %}
+            </div>
+            <div class="pbc-col" id="{{ pfx }}-col-color">
+              {% for c in co %}
+              <div class="preset-field-line">
+                <input type="text" class="preset-size-opt" name="{{ pfx }}_type2_opts" value="{{ c|e }}" placeholder="Renk" autocomplete="off" />
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+          {%- endmacro %}
+          {% macro preset_product_block(title, pfx, vp) -%}
+              <div class="preset-block">
+                <h3>{{ title }}</h3>
+                <div class="preset-size-cols">
+                  <div class="preset-size-head">Size</div>
+                  <div class="preset-size-head">Fiyat</div>
+                  <div class="preset-size-head">Color</div>
+                  <input type="text" id="{{ pfx }}_type1_name" name="{{ pfx }}_type1_name" value="{{ vp.type1.name|e }}" placeholder="Örn. Size" autocomplete="off" />
+                  <span aria-hidden="true"></span>
+                  <input type="text" id="{{ pfx }}_type2_name" name="{{ pfx }}_type2_name" value="{{ vp.type2.name|e }}" placeholder="Örn. Color" autocomplete="off" />
+                </div>
+                {{ preset_data_body(pfx, vp.type1.options, vp.type1.prices, vp.type2.options) }}
+                <div class="preset-add-row">
+                  <button type="button" class="btn btn-secondary preset-add-size" data-preset-add-sizes="{{ pfx }}">+ Beden ekle</button>
+                  <button type="button" class="btn btn-secondary preset-add-color" data-preset-add-colors="{{ pfx }}">+ Renk ekle</button>
+                </div>
+              </div>
+          {%- endmacro %}
+
           <div class="tab-page">
             <form method="post" action="/presets/save">
-              <div class="preset-block">
-                <h3>Shirt</h3>
-                <div class="row2">
-                  <div>
-                    <label for="shirt_type1_name">Birincil özellik adı (ör. Size)</label>
-                    <input type="text" id="shirt_type1_name" name="shirt_type1_name" value="{{ variation_presets.shirt.type1.name|e }}" />
-                  </div>
-                  <div>
-                    <label for="shirt_type2_name">İkincil özellik adı (ör. Color)</label>
-                    <input type="text" id="shirt_type2_name" name="shirt_type2_name" value="{{ variation_presets.shirt.type2.name|e }}" />
-                  </div>
-                </div>
-                <label for="shirt_type1_options">Birincil seçenekler (satır başına bir)</label>
-                <textarea id="shirt_type1_options" name="shirt_type1_options">{% for o in variation_presets.shirt.type1.options %}{{ o }}
-{% endfor %}</textarea>
-                <label for="shirt_type2_options" style="margin-top:12px;">İkincil seçenekler (satır başına bir)</label>
-                <textarea id="shirt_type2_options" name="shirt_type2_options">{% for o in variation_presets.shirt.type2.options %}{{ o }}
-{% endfor %}</textarea>
-              </div>
-              <div class="preset-block">
-                <h3>Sweatshirt &amp; hoodie</h3>
-                <div class="row2">
-                  <div>
-                    <label for="sweat_type1_name">Birincil özellik adı</label>
-                    <input type="text" id="sweat_type1_name" name="sweat_type1_name" value="{{ variation_presets.sweatshirt.type1.name|e }}" />
-                  </div>
-                  <div>
-                    <label for="sweat_type2_name">İkincil özellik adı</label>
-                    <input type="text" id="sweat_type2_name" name="sweat_type2_name" value="{{ variation_presets.sweatshirt.type2.name|e }}" />
-                  </div>
-                </div>
-                <label for="sweat_type1_options">Birincil seçenekler</label>
-                <textarea id="sweat_type1_options" name="sweat_type1_options">{% for o in variation_presets.sweatshirt.type1.options %}{{ o }}
-{% endfor %}</textarea>
-                <label for="sweat_type2_options" style="margin-top:12px;">İkincil seçenekler</label>
-                <textarea id="sweat_type2_options" name="sweat_type2_options">{% for o in variation_presets.sweatshirt.type2.options %}{{ o }}
-{% endfor %}</textarea>
-              </div>
-              <div class="preset-block">
-                <h3>Comfort Colors</h3>
-                <div class="row2">
-                  <div>
-                    <label for="cc_type1_name">Birincil özellik adı</label>
-                    <input type="text" id="cc_type1_name" name="cc_type1_name" value="{{ variation_presets.comfort_colors.type1.name|e }}" />
-                  </div>
-                  <div>
-                    <label for="cc_type2_name">İkincil özellik adı</label>
-                    <input type="text" id="cc_type2_name" name="cc_type2_name" value="{{ variation_presets.comfort_colors.type2.name|e }}" />
-                  </div>
-                </div>
-                <label for="cc_type1_options">Birincil seçenekler</label>
-                <textarea id="cc_type1_options" name="cc_type1_options">{% for o in variation_presets.comfort_colors.type1.options %}{{ o }}
-{% endfor %}</textarea>
-                <label for="cc_type2_options" style="margin-top:12px;">İkincil seçenekler</label>
-                <textarea id="cc_type2_options" name="cc_type2_options">{% for o in variation_presets.comfort_colors.type2.options %}{{ o }}
-{% endfor %}</textarea>
-              </div>
+              {{ preset_product_block('Shirt', 'shirt', variation_presets.shirt) }}
+              {{ preset_product_block('Sweatshirt &amp; hoodie', 'sweat', variation_presets.sweatshirt) }}
+              {{ preset_product_block('Comfort Colors', 'cc', variation_presets.comfort_colors) }}
               <button type="submit" class="btn btn-primary">Presetleri kaydet</button>
             </form>
+            <script>
+              (function () {
+                function clearPresetPriceIfInvalid(input) {
+                  if (!input || input.type !== 'number' || !input.classList.contains('preset-size-price')) return;
+                  var raw = (input.value || '').trim();
+                  if (raw === '') return;
+                  if (input.validity && input.validity.badInput) {
+                    input.value = '';
+                    return;
+                  }
+                  var n = input.valueAsNumber;
+                  if (!Number.isFinite(n) || n < 0) {
+                    input.value = '';
+                  }
+                }
+                var presetForm = document.querySelector('form[action="/presets/save"]');
+                if (presetForm) {
+                  presetForm.addEventListener('focusout', function (e) {
+                    clearPresetPriceIfInvalid(e.target);
+                  });
+                  presetForm.addEventListener('submit', function () {
+                    presetForm.querySelectorAll('input.preset-size-price[type="number"]').forEach(clearPresetPriceIfInvalid);
+                  });
+                }
+                var cfg = {
+                  shirt: { opts: 'shirt_type1_opts', prices: 'shirt_type1_opt_prices' },
+                  sweat: { opts: 'sweat_type1_opts', prices: 'sweat_type1_opt_prices' },
+                  cc: { opts: 'cc_type1_opts', prices: 'cc_type1_opt_prices' }
+                };
+                var colorNames = { shirt: 'shirt_type2_opts', sweat: 'sweat_type2_opts', cc: 'cc_type2_opts' };
+                function addRow(pfx) {
+                  var cs = document.getElementById(pfx + '-col-size');
+                  var cq = document.getElementById(pfx + '-col-price');
+                  var c = cfg[pfx];
+                  if (!cs || !cq || !c) return;
+                  var ls = document.createElement('div');
+                  ls.className = 'preset-field-line';
+                  ls.innerHTML = '<input type="text" class="preset-size-opt" name="' + c.opts + '" value="" placeholder="Beden / stil" autocomplete="off" />';
+                  var lq = document.createElement('div');
+                  lq.className = 'preset-field-line';
+                  lq.innerHTML =
+                    '<div class="preset-price-wrap">' +
+                    '<span class="preset-currency">$</span>' +
+                    '<input type="number" class="preset-size-price" name="' + c.prices + '" value="" placeholder="0.00" step="0.01" min="0" inputmode="decimal" autocomplete="off" />' +
+                    '</div>';
+                  cs.appendChild(ls);
+                  cq.appendChild(lq);
+                }
+                function addColorRow(pfx) {
+                  var cc = document.getElementById(pfx + '-col-color');
+                  var nm = colorNames[pfx];
+                  if (!cc || !nm) return;
+                  var row = document.createElement('div');
+                  row.className = 'preset-field-line';
+                  row.innerHTML =
+                    '<input type="text" class="preset-size-opt" name="' + nm + '" value="" placeholder="Renk" autocomplete="off" />';
+                  cc.appendChild(row);
+                }
+                document.querySelectorAll('[data-preset-add-sizes]').forEach(function (btn) {
+                  btn.addEventListener('click', function () {
+                    addRow(btn.getAttribute('data-preset-add-sizes'));
+                  });
+                });
+                document.querySelectorAll('[data-preset-add-colors]').forEach(function (btn) {
+                  btn.addEventListener('click', function () {
+                    addColorRow(btn.getAttribute('data-preset-add-colors'));
+                  });
+                });
+              })();
+            </script>
           </div>
           {% endif %}
         </div>
