@@ -343,7 +343,7 @@
       .listing-strip .thumb {
         width: 72px;
         height: 72px;
-        object-fit: cover;
+        object-fit: contain;
         border-radius: 8px;
         border: 1px solid var(--border);
         background: #f3f4f6;
@@ -444,7 +444,7 @@
       .ws-photo-tile img {
         width: 100%;
         height: 100%;
-        object-fit: cover;
+        object-fit: contain;
         display: block;
         pointer-events: none;
         user-select: none;
@@ -671,15 +671,77 @@
       }
       details.ws-adv summary { cursor: pointer; font-weight: 600; font-size: 0.88rem; margin-bottom: 8px; }
       .ws-adv textarea { min-height: 160px; font-size: 0.75rem; }
+
+      .tab-page { max-width: 1100px; }
+      .drafts-table-wrap { overflow-x: auto; margin-top: 8px; }
+      .drafts-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.88rem;
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+      .drafts-table th, .drafts-table td {
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+        text-align: left;
+        vertical-align: middle;
+      }
+      .drafts-table th { background: #f8f9fb; font-weight: 600; font-size: 0.8rem; color: var(--text-muted); }
+      .draft-thumb {
+        width: 56px;
+        height: 56px;
+        object-fit: contain;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: #f3f4f6;
+      }
+      .draft-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+      .preset-block {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 16px 18px;
+        margin-bottom: 16px;
+        box-shadow: var(--shadow);
+      }
+      .preset-block h3 { margin: 0 0 12px; font-size: 1rem; }
+      .preset-block label { display: block; font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; color: var(--text-muted); }
+      .preset-block textarea {
+        width: 100%;
+        min-height: 140px;
+        font-family: ui-monospace, monospace;
+        font-size: 0.8rem;
+        padding: 8px 10px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+      }
+      .preset-block input[type="text"] {
+        width: 100%;
+        max-width: 280px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+      }
+      .preset-block .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+      @media (max-width: 720px) { .preset-block .row2 { grid-template-columns: 1fr; } }
     </style>
   </head>
   <body>
     <div class="app">
       <aside class="sidebar">
         <div class="sidebar-brand">Etsy <span>Lab</span></div>
-        <div class="nav-item" style="pointer-events: none; opacity: 0.85; cursor: default; border-left: 3px solid var(--accent); padding-left: 17px;">
+        <a href="/" class="nav-item {% if active_tab == 'workspace' %}active{% endif %}">
           <span class="nav-icon">✏️</span> Listing workspace
-        </div>
+        </a>
+        <a href="/drafts" class="nav-item {% if active_tab == 'drafts' %}active{% endif %}">
+          <span class="nav-icon">📋</span> Drafts
+        </a>
+        <a href="/presets" class="nav-item {% if active_tab == 'presets' %}active{% endif %}">
+          <span class="nav-icon">⚙️</span> Presets
+        </a>
         <p style="padding: 8px 20px 0; margin: 0; font-size: 0.8rem; color: #8b909a; line-height: 1.45;">
           Amazon URL’sinden veri çekin, düzenleyip Etsy draft oluşturun veya güncelleyin.
         </p>
@@ -688,10 +750,18 @@
       <div class="main">
         <header class="topbar">
           <div>
+            {% if active_tab == 'workspace' %}
             <h1>Listing workspace</h1>
             <div class="topbar-meta">
               Görselleri sürükleyerek sıralayın; varyasyonları Etsy’deki gibi düzenleyin.
             </div>
+            {% elif active_tab == 'drafts' %}
+            <h1>Drafts</h1>
+            <div class="topbar-meta">Yerel kayıtlı listing’ler — Etsy’de silmek için Sil kullanın.</div>
+            {% elif active_tab == 'presets' %}
+            <h1>Varyasyon preset’leri</h1>
+            <div class="topbar-meta">Shirt / sweatshirt / Comfort Colors beden ve renk listelerini düzenleyin.</div>
+            {% endif %}
           </div>
         </header>
 
@@ -703,6 +773,7 @@
           <div class="alert alert-success"><strong>Tamam.</strong> {{ status }}</div>
           {% endif %}
 
+          {% if active_tab == 'workspace' %}
           <div class="ws-page">
             <div class="ws-toolbar">
               <a class="link-back" href="/">← Ana</a>
@@ -797,9 +868,21 @@
                     <div>
                       <select id="ws_variation_preset" style="width:100%;max-width:320px;padding:10px;border-radius:8px;border:1px solid var(--border);">
                         <option value="custom" {% if ws.variation_preset == 'custom' %}selected{% endif %}>Özel (elle)</option>
-                        <option value="shirt" {% if ws.variation_preset == 'shirt' %}selected{% endif %}>Shirt preset (yakında)</option>
+                        <option value="shirt" {% if ws.variation_preset == 'shirt' %}selected{% endif %}>Shirt preset</option>
+                        <option value="sweatshirt" {% if ws.variation_preset == 'sweatshirt' %}selected{% endif %}>Sweatshirt &amp; hoodie</option>
+                        <option value="comfort_colors" {% if ws.variation_preset == 'comfort_colors' %}selected{% endif %}>Comfort Colors</option>
                       </select>
-                      <p class="hint" style="margin-top:8px;">İlerleyen aşamalarda hazır varyasyon preset’leri buradan seçilebilecek.</p>
+                      <p class="hint" style="margin-top:8px;">Seçim taslakta saklanır; Etsy envanteri aşağıdaki varyasyon satırlarına göre güncellenir (Presets sekmesindeki listeleri buraya elle yansıtın).</p>
+                    </div>
+                  </div>
+                  <div class="ws-row">
+                    <div class="ws-label">Kategori (Etsy)</div>
+                    <div>
+                      <select id="ws_category_taxonomy" style="width:100%;max-width:360px;padding:10px;border-radius:8px;border:1px solid var(--border);">
+                        <option value="tshirts" {% if ws.category_taxonomy == 'tshirts' %}selected{% endif %}>T-shirts</option>
+                        <option value="sweatshirts" {% if ws.category_taxonomy == 'sweatshirts' %}selected{% endif %}>Sweatshirts</option>
+                      </select>
+                      <p class="hint" style="margin-top:8px;">Yeni draft oluştururken Etsy taxonomy ID’si buna göre atanır.</p>
                     </div>
                   </div>
                   <div class="ws-row">
@@ -942,11 +1025,8 @@
 
               <div class="ws-section">
                 <div class="ws-section-body">
-                  <label class="check-row">
-                    <input type="checkbox" name="apply_variations" id="ws_apply_var" />
-                    <span>Varyasyonları Etsy inventory’ye uygula (scraped Color/Size)</span>
-                  </label>
-                  <div class="ws-row" style="margin-top:14px;">
+                  <p class="hint" style="margin:0 0 12px;">Yayınlarken tanımlı varyasyonlar Etsy envanterine uygulanır (readiness state .env’de gerekli).</p>
+                  <div class="ws-row" style="margin-top:0;">
                     <div class="ws-label">Mevcut listing ID</div>
                     <div>
                       <input type="text" name="etsy_update_listing_id" value="{{ workspace_listing_id }}" placeholder="Boş = yeni Etsy draft" style="max-width:280px;padding:10px;border-radius:8px;border:1px solid var(--border);" />
@@ -1337,6 +1417,9 @@
                     if (s.description_text) document.getElementById('ws_description').value = s.description_text;
                     const tags = Array.isArray(s.tags) ? s.tags.join(', ') : '';
                     document.getElementById('ws_tags').value = tags;
+                    const wm = s.workspace_meta && typeof s.workspace_meta === 'object' ? s.workspace_meta : {};
+                    const cat = document.getElementById('ws_category_taxonomy');
+                    if (cat && wm.category_taxonomy) cat.value = wm.category_taxonomy;
                     wsRenderPhotosFromSeed();
                     wsRenderVariationsFromSeed();
                     titleCount();
@@ -1361,6 +1444,7 @@
                   d.workspace_meta.sku = (document.getElementById('ws_sku') && document.getElementById('ws_sku').value) || '';
                   d.workspace_meta.quantity = (document.getElementById('ws_qty') && document.getElementById('ws_qty').value) || '1';
                   d.workspace_meta.section = (document.getElementById('ws_section') && document.getElementById('ws_section').value) || '';
+                  d.workspace_meta.category_taxonomy = (document.getElementById('ws_category_taxonomy') && document.getElementById('ws_category_taxonomy').value) || 'tshirts';
                   const r = document.querySelector('input[name=ws_renewal]:checked');
                   d.workspace_meta.renewal = r ? r.value : 'manual';
                   const lt = document.querySelector('input[name=ws_ltype]:checked');
@@ -1375,6 +1459,116 @@
             </script>
             {% endif %}
           </div>
+          {% elif active_tab == 'drafts' %}
+          <div class="tab-page drafts-table-wrap">
+            <table class="drafts-table">
+              <thead>
+                <tr>
+                  <th></th>
+                  <th>Başlık</th>
+                  <th>Listing ID</th>
+                  <th>Fiyat</th>
+                  <th>Kaynak</th>
+                  <th>İşlem</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in app_draft_listings %}
+                <tr>
+                  <td>
+                    {% if row.image %}
+                    <img class="draft-thumb" src="{{ row.image|e }}" alt="" loading="lazy" onerror="this.style.opacity=0.25" />
+                    {% else %}—{% endif %}
+                  </td>
+                  <td>{{ row.title|e }}</td>
+                  <td>{{ row.listing_id }}</td>
+                  <td>{{ row.price|e }}</td>
+                  <td style="max-width:220px;word-break:break-all;font-size:0.82rem;">{{ (row.amazon_url or row.source_url or '')|e }}</td>
+                  <td>
+                    <div class="draft-actions">
+                      <form method="post" action="/drafts/open">
+                        <input type="hidden" name="listing_id" value="{{ row.listing_id }}" />
+                        <button type="submit" class="btn btn-secondary" style="padding:6px 12px;font-size:0.8rem;">Workspace’te aç</button>
+                      </form>
+                      <form method="post" action="/drafts/delete" onsubmit="return confirm('Bu listing Etsy’den de silinsin mi?');">
+                        <input type="hidden" name="listing_id" value="{{ row.listing_id }}" />
+                        <button type="submit" class="btn btn-secondary" style="padding:6px 12px;font-size:0.8rem;color:var(--danger-text);border-color:#f5c2c7;background:var(--danger-bg);">Sil</button>
+                      </form>
+                    </div>
+                  </td>
+                </tr>
+                {% else %}
+                <tr>
+                  <td colspan="6" style="text-align:center;color:var(--text-muted);padding:28px;">Henüz kayıtlı draft yok. Workspace’te yayınladığınız listing’ler burada listelenir.</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% elif active_tab == 'presets' %}
+          <div class="tab-page">
+            <form method="post" action="/presets/save">
+              <div class="preset-block">
+                <h3>Shirt</h3>
+                <div class="row2">
+                  <div>
+                    <label for="shirt_type1_name">Birincil özellik adı (ör. Size)</label>
+                    <input type="text" id="shirt_type1_name" name="shirt_type1_name" value="{{ variation_presets.shirt.type1.name|e }}" />
+                  </div>
+                  <div>
+                    <label for="shirt_type2_name">İkincil özellik adı (ör. Color)</label>
+                    <input type="text" id="shirt_type2_name" name="shirt_type2_name" value="{{ variation_presets.shirt.type2.name|e }}" />
+                  </div>
+                </div>
+                <label for="shirt_type1_options">Birincil seçenekler (satır başına bir)</label>
+                <textarea id="shirt_type1_options" name="shirt_type1_options">{% for o in variation_presets.shirt.type1.options %}{{ o }}
+{% endfor %}</textarea>
+                <label for="shirt_type2_options" style="margin-top:12px;">İkincil seçenekler (satır başına bir)</label>
+                <textarea id="shirt_type2_options" name="shirt_type2_options">{% for o in variation_presets.shirt.type2.options %}{{ o }}
+{% endfor %}</textarea>
+              </div>
+              <div class="preset-block">
+                <h3>Sweatshirt &amp; hoodie</h3>
+                <div class="row2">
+                  <div>
+                    <label for="sweat_type1_name">Birincil özellik adı</label>
+                    <input type="text" id="sweat_type1_name" name="sweat_type1_name" value="{{ variation_presets.sweatshirt.type1.name|e }}" />
+                  </div>
+                  <div>
+                    <label for="sweat_type2_name">İkincil özellik adı</label>
+                    <input type="text" id="sweat_type2_name" name="sweat_type2_name" value="{{ variation_presets.sweatshirt.type2.name|e }}" />
+                  </div>
+                </div>
+                <label for="sweat_type1_options">Birincil seçenekler</label>
+                <textarea id="sweat_type1_options" name="sweat_type1_options">{% for o in variation_presets.sweatshirt.type1.options %}{{ o }}
+{% endfor %}</textarea>
+                <label for="sweat_type2_options" style="margin-top:12px;">İkincil seçenekler</label>
+                <textarea id="sweat_type2_options" name="sweat_type2_options">{% for o in variation_presets.sweatshirt.type2.options %}{{ o }}
+{% endfor %}</textarea>
+              </div>
+              <div class="preset-block">
+                <h3>Comfort Colors</h3>
+                <div class="row2">
+                  <div>
+                    <label for="cc_type1_name">Birincil özellik adı</label>
+                    <input type="text" id="cc_type1_name" name="cc_type1_name" value="{{ variation_presets.comfort_colors.type1.name|e }}" />
+                  </div>
+                  <div>
+                    <label for="cc_type2_name">İkincil özellik adı</label>
+                    <input type="text" id="cc_type2_name" name="cc_type2_name" value="{{ variation_presets.comfort_colors.type2.name|e }}" />
+                  </div>
+                </div>
+                <label for="cc_type1_options">Birincil seçenekler</label>
+                <textarea id="cc_type1_options" name="cc_type1_options">{% for o in variation_presets.comfort_colors.type1.options %}{{ o }}
+{% endfor %}</textarea>
+                <label for="cc_type2_options" style="margin-top:12px;">İkincil seçenekler</label>
+                <textarea id="cc_type2_options" name="cc_type2_options">{% for o in variation_presets.comfort_colors.type2.options %}{{ o }}
+{% endfor %}</textarea>
+              </div>
+              <button type="submit" class="btn btn-primary">Presetleri kaydet</button>
+            </form>
+          </div>
+          {% endif %}
         </div>
       </div>
     </div>

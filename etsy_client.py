@@ -268,6 +268,16 @@ def update_existing_listing(
     return data if isinstance(data, dict) else {"result": data}
 
 
+def delete_listing(listing_id: int, shop_id: Optional[int] = None) -> None:
+    """Etsy listing'i siler (draft dahil)."""
+    sid = shop_id if shop_id is not None else _env_int("ETSY_SHOP_ID", required=True)
+    url = f"{ETSY_API}/application/shops/{sid}/listings/{listing_id}"
+    with httpx.Client(timeout=60.0) as client:
+        r = _client_request(client, "DELETE", url, headers=_headers_json())
+    if r.status_code >= 400:
+        raise RuntimeError(f"Etsy delete listing {r.status_code}: {r.text}")
+
+
 def upload_listing_image_from_url(
     listing_id: int,
     image_url: str,

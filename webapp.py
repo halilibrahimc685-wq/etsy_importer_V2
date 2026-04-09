@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -12,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 
 from etsy_client import (
     create_draft_listing,
+    delete_listing,
     normalize_listing_who_when_supply,
     update_existing_listing,
     update_listing_inventory,
@@ -24,6 +27,159 @@ load_dotenv()
 
 app = FastAPI(title="Amazon -> Etsy Importer")
 templates = Jinja2Templates(directory="templates")
+APP_DRAFTS_FILE = Path("drafts") / "app_draft_listings.json"
+PRESETS_FILE = Path("drafts") / "variation_presets.json"
+CATEGORY_TAXONOMY_MAP = {
+    "tshirts": 482,       # Clothing > Gender-Neutral Adult Clothing > Tops & Tees > T-shirts
+    "sweatshirts": 2202,  # Clothing > Gender-Neutral Adult Clothing > Hoodies & Sweatshirts > Sweatshirts
+}
+
+DEFAULT_VARIATION_PRESETS: dict[str, Any] = {
+    "shirt": {
+        "label": "Shirt",
+        "type1": {
+            "name": "Size",
+            "options": [
+                "Unisex Adult T-Shirt - S",
+                "Unisex Adult T-Shirt - M",
+                "Unisex Adult T-Shirt - L",
+                "Unisex Adult T-Shirt - XL",
+                "Unisex Adult T-Shirt - 2XL",
+                "Unisex Adult T-Shirt - 3XL",
+                "Youth - S",
+                "Youth - M",
+                "Youth - L",
+                "Youth - XL",
+                "Toddler - 2T",
+                "Toddler - 3T",
+                "Toddler - 4T",
+                "Toddler - 5T",
+                "Baby Onesie 3 - 6 Mos.",
+                "Baby Onesie 6 - 12 Mos.",
+                "Baby Onesie 12 - 18 Mos.",
+                "Baby Onesie 18 - 24 Mos.",
+            ],
+        },
+        "type2": {
+            "name": "Color",
+            "options": [
+                "Athletic Heather",
+                "Black",
+                "Dark Grey Heather",
+                "Heather Columbia Blue",
+                "Heather Maroon",
+                "Heather Mauve",
+                "Heather Navy",
+                "Heather Peach",
+                "Kelly Green",
+                "Orange",
+                "Pink",
+                "Red",
+                "Soft Cream",
+                "White",
+            ],
+        },
+    },
+    "sweatshirt": {
+        "label": "Sweatshirt & Hoodie",
+        "type1": {
+            "name": "Size",
+            "options": [
+                "Unisex Crewneck - S",
+                "Unisex Crewneck - M",
+                "Unisex Crewneck - L",
+                "Unisex Crewneck - XL",
+                "Unisex Crewneck - 2XL",
+                "Unisex Crewneck - 3XL",
+                "Unisex Hoodie - S",
+                "Unisex Hoodie - M",
+                "Unisex Hoodie - L",
+                "Unisex Hoodie - XL",
+                "Unisex Hoodie - 2XL",
+                "Unisex Hoodie - 3XL",
+                "Youth Crewneck - S",
+                "Youth Crewneck - M",
+                "Youth Crewneck - L",
+                "Youth Crewneck - XL",
+                "Youth Hoodie - S",
+                "Youth Hoodie - M",
+                "Youth Hoodie - L",
+                "Youth Hoodie - XL",
+            ],
+        },
+        "type2": {
+            "name": "Color",
+            "options": [
+                "White",
+                "Black",
+                "Forest",
+                "Irish Green",
+                "Light Blue",
+                "Light Pink",
+                "Maroon",
+                "Military Green",
+                "Navy",
+                "Orange",
+                "Red",
+                "Sand",
+                "Sport Grey",
+            ],
+        },
+    },
+    "comfort_colors": {
+        "label": "Comfort Colors",
+        "type1": {
+            "name": "Size",
+            "options": [
+                "CC Unisex T-shirt - S",
+                "CC Unisex T-shirt - M",
+                "CC Unisex T-shirt - L",
+                "CC Unisex T-shirt - XL",
+                "CC Unisex T-shirt - 2XL",
+                "CC Unisex T-shirt - 3XL",
+                "CC Unisex T-shirt - 4XL",
+                "CC Unisex Long Sleeve Shirt - S",
+                "CC Unisex Long Sleeve Shirt - M",
+                "CC Unisex Long Sleeve Shirt - L",
+                "CC Unisex Long Sleeve Shirt - XL",
+                "CC Unisex Long Sleeve Shirt - 2XL",
+                "CC Unisex Long Sleeve Shirt - 3XL",
+                "CC Youth T-shirt - S",
+                "CC Youth T-shirt - M",
+                "CC Youth T-shirt - L",
+                "CC Youth T-shirt - XL",
+                "CC Unisex Sweatshirt - S",
+                "CC Unisex Sweatshirt - M",
+                "CC Unisex Sweatshirt - L",
+                "CC Unisex Sweatshirt - XL",
+                "CC Unisex Sweatshirt - 2XL",
+                "CC Unisex Sweatshirt - 3XL",
+            ],
+        },
+        "type2": {
+            "name": "Color",
+            "options": [
+                "Light Green",
+                "Moss",
+                "Black",
+                "Pepper",
+                "Gray",
+                "Blue Jean",
+                "Chalky Mint",
+                "Violet",
+                "Orchid",
+                "White",
+                "Ivory",
+                "Mustard",
+                "Red",
+                "Crimson",
+                "Yam",
+                "Berry",
+                "Blossom",
+            ],
+        },
+    },
+}
 
 
 def _validate_amazon_url(url: str) -> None:
@@ -130,6 +286,173 @@ def _etsy_shop_display_name() -> str:
     return (os.environ.get("ETSY_SHOP_NAME") or "Your shop").strip()
 
 
+def _load_app_draft_listings(limit: int = 50) -> list[dict[str, Any]]:
+    try:
+        if not APP_DRAFTS_FILE.exists():
+            return []
+        data = json.loads(APP_DRAFTS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            return []
+        rows = [x for x in data if isinstance(x, dict)]
+        for row in rows:
+            lid = row.get("listing_id")
+            if row.get("etsy_listing_id") is None and lid is not None:
+                row["etsy_listing_id"] = lid
+            if not row.get("amazon_url") and row.get("source_url"):
+                row["amazon_url"] = row.get("source_url")
+            if row.get("sku") is None:
+                row["sku"] = ""
+            if row.get("variation_preset") is None:
+                row["variation_preset"] = "custom"
+            if row.get("section") is None:
+                row["section"] = ""
+        rows.sort(key=lambda x: str(x.get("saved_at") or ""), reverse=True)
+        return rows[:limit]
+    except Exception:
+        return []
+
+
+def _save_app_draft_listing(*, listing_id: int, draft: dict[str, Any], price: str, mode: str) -> None:
+    APP_DRAFTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    rows = _load_app_draft_listings(limit=500)
+    src = draft.get("source") if isinstance(draft.get("source"), dict) else {}
+    meta = draft.get("workspace_meta") if isinstance(draft.get("workspace_meta"), dict) else {}
+    row = {
+        "listing_id": int(listing_id),
+        "etsy_listing_id": int(listing_id),
+        "title": str(draft.get("title") or "")[:140],
+        "price": str(price or ""),
+        "sku": str(meta.get("sku") or ""),
+        "variation_preset": str(meta.get("variation_preset") or "custom"),
+        "section": str(meta.get("section") or ""),
+        "image": (draft.get("images") or [None])[0] if isinstance(draft.get("images"), list) else None,
+        "source_url": str(src.get("url") or ""),
+        "amazon_url": str(src.get("url") or ""),
+        "source_item_id": str(src.get("item_id") or ""),
+        "etsy_url": f"https://www.etsy.com/your/shops/me/listing-editor/{int(listing_id)}",
+        "mode": mode,  # create|update
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "draft_json": draft if isinstance(draft, dict) else {},
+    }
+    # aynı listing tekrar kaydedilirse en üste al ve güncelle
+    target = int(listing_id)
+    filtered: list[dict[str, Any]] = []
+    for r in rows:
+        try:
+            rid1 = int(r.get("listing_id") or -1)
+        except Exception:
+            rid1 = -1
+        try:
+            rid2 = int(r.get("etsy_listing_id") or -1)
+        except Exception:
+            rid2 = -1
+        if rid1 == target or rid2 == target:
+            continue
+        filtered.append(r)
+    rows = filtered
+    rows.insert(0, row)
+    APP_DRAFTS_FILE.write_text(json.dumps(rows[:500], ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _delete_app_draft_listing(listing_id: int) -> bool:
+    rows = _load_app_draft_listings(limit=500)
+    target = int(listing_id)
+    kept: list[dict[str, Any]] = []
+    removed = False
+    for r in rows:
+        try:
+            rid1 = int(r.get("listing_id") or -1)
+        except Exception:
+            rid1 = -1
+        try:
+            rid2 = int(r.get("etsy_listing_id") or -1)
+        except Exception:
+            rid2 = -1
+        if rid1 == target or rid2 == target:
+            removed = True
+            continue
+        kept.append(r)
+    if removed:
+        APP_DRAFTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        APP_DRAFTS_FILE.write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
+    return removed
+
+
+def _load_variation_presets() -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    try:
+        if PRESETS_FILE.exists():
+            raw = json.loads(PRESETS_FILE.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                data = raw
+    except Exception:
+        data = {}
+
+    merged = json.loads(json.dumps(DEFAULT_VARIATION_PRESETS, ensure_ascii=False))
+    for key, val in data.items():
+        if key not in merged or not isinstance(val, dict):
+            continue
+        for part in ("type1", "type2"):
+            if isinstance(val.get(part), dict):
+                if isinstance(val[part].get("name"), str):
+                    merged[key][part]["name"] = val[part]["name"].strip() or merged[key][part]["name"]
+                if isinstance(val[part].get("options"), list):
+                    opts = [str(x).strip() for x in val[part]["options"] if str(x).strip()]
+                    if opts:
+                        merged[key][part]["options"] = opts
+    return merged
+
+
+def _save_variation_presets_from_form(form: dict[str, str]) -> None:
+    def _opts(name: str) -> list[str]:
+        raw = str(form.get(name) or "")
+        out: list[str] = []
+        seen: set[str] = set()
+        for line in raw.splitlines():
+            v = line.strip()
+            if not v:
+                continue
+            if v not in seen:
+                seen.add(v)
+                out.append(v)
+        return out
+
+    presets = _load_variation_presets()
+    presets["shirt"]["type1"]["name"] = str(form.get("shirt_type1_name") or "Size").strip() or "Size"
+    presets["shirt"]["type2"]["name"] = str(form.get("shirt_type2_name") or "Color").strip() or "Color"
+    presets["shirt"]["type1"]["options"] = _opts("shirt_type1_options") or presets["shirt"]["type1"]["options"]
+    presets["shirt"]["type2"]["options"] = _opts("shirt_type2_options") or presets["shirt"]["type2"]["options"]
+
+    presets["sweatshirt"]["type1"]["name"] = (
+        str(form.get("sweat_type1_name") or "Size").strip() or "Size"
+    )
+    presets["sweatshirt"]["type2"]["name"] = (
+        str(form.get("sweat_type2_name") or "Color").strip() or "Color"
+    )
+    presets["sweatshirt"]["type1"]["options"] = (
+        _opts("sweat_type1_options") or presets["sweatshirt"]["type1"]["options"]
+    )
+    presets["sweatshirt"]["type2"]["options"] = (
+        _opts("sweat_type2_options") or presets["sweatshirt"]["type2"]["options"]
+    )
+
+    presets["comfort_colors"]["type1"]["name"] = (
+        str(form.get("cc_type1_name") or "Size").strip() or "Size"
+    )
+    presets["comfort_colors"]["type2"]["name"] = (
+        str(form.get("cc_type2_name") or "Color").strip() or "Color"
+    )
+    presets["comfort_colors"]["type1"]["options"] = (
+        _opts("cc_type1_options") or presets["comfort_colors"]["type1"]["options"]
+    )
+    presets["comfort_colors"]["type2"]["options"] = (
+        _opts("cc_type2_options") or presets["comfort_colors"]["type2"]["options"]
+    )
+
+    PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PRESETS_FILE.write_text(json.dumps(presets, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _draft_listing_create_args(draft: dict[str, Any]) -> tuple[dict[str, Any], str]:
     """create_draft_listing için who_made / when_made / is_supply ve opsiyonel uyarı."""
     meta = draft.get("workspace_meta")
@@ -142,8 +465,15 @@ def _draft_listing_create_args(draft: dict[str, Any]) -> tuple[dict[str, Any], s
     who, when, is_supply, note = normalize_listing_who_when_supply(
         who_made=who, when_made=when, is_supply=is_supply
     )
+    cat_key = str(meta.get("category_taxonomy") or "tshirts").strip().lower()
+    taxonomy_id = CATEGORY_TAXONOMY_MAP.get(cat_key, CATEGORY_TAXONOMY_MAP["tshirts"])
     return (
-        {"who_made": who, "when_made": when, "is_supply": is_supply},
+        {
+            "who_made": who,
+            "when_made": when,
+            "is_supply": is_supply,
+            "taxonomy_id": taxonomy_id,
+        },
         note,
     )
 
@@ -160,6 +490,7 @@ def _workspace_ui(draft: Optional[dict[str, Any]]) -> dict[str, Any]:
         "sku": "",
         "quantity": "1",
         "variation_preset": "custom",
+        "category_taxonomy": "tshirts",
     }
     if not draft:
         return {
@@ -229,6 +560,7 @@ def _workspace_ui(draft: Optional[dict[str, Any]]) -> dict[str, Any]:
         "sku": str(meta.get("sku") or ""),
         "quantity": str(meta.get("quantity") or "1"),
         "variation_preset": str(meta.get("variation_preset") or "custom"),
+        "category_taxonomy": str(meta.get("category_taxonomy") or "tshirts"),
     }
 
 
@@ -253,6 +585,7 @@ def _render_index(
     workspace_price: str = "19.99",
     workspace_listing_id: str = "",
     etsy_shop_name: str = "",
+    active_tab: str = "workspace",
 ) -> HTMLResponse:
     if not etsy_shop_name:
         etsy_shop_name = _etsy_shop_display_name()
@@ -261,6 +594,7 @@ def _render_index(
     elif not workspace_draft_json.strip():
         workspace_draft_json = "{}"
     ws = _workspace_ui(workspace_draft)
+    variation_presets = _load_variation_presets()
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -275,6 +609,9 @@ def _render_index(
             "workspace_listing_id": workspace_listing_id,
             "etsy_shop_name": etsy_shop_name,
             "ws": ws,
+            "app_draft_listings": _load_app_draft_listings(),
+            "variation_presets": variation_presets,
+            "active_tab": active_tab,
         },
     )
 
@@ -282,6 +619,124 @@ def _render_index(
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request) -> HTMLResponse:
     return _render_index(request)
+
+
+@app.get("/presets", response_class=HTMLResponse)
+def presets(request: Request) -> HTMLResponse:
+    return _render_index(request, active_tab="presets")
+
+
+@app.get("/drafts", response_class=HTMLResponse)
+def drafts(request: Request) -> HTMLResponse:
+    return _render_index(request, active_tab="drafts")
+
+
+@app.post("/drafts/open", response_class=HTMLResponse)
+def drafts_open(request: Request, listing_id: int = Form(...)) -> HTMLResponse:
+    rows = _load_app_draft_listings(limit=500)
+    selected = None
+    for row in rows:
+        if int(row.get("listing_id") or -1) == int(listing_id):
+            selected = row
+            break
+    if not selected:
+        return _render_index(request, active_tab="drafts", error=f"Draft bulunamadı: {listing_id}")
+
+    draft_obj = selected.get("draft_json")
+    if not isinstance(draft_obj, dict):
+        draft_obj = {
+            "title": str(selected.get("title") or ""),
+            "images": [selected.get("image")] if selected.get("image") else [],
+            "source": {
+                "url": str(selected.get("source_url") or ""),
+                "item_id": str(selected.get("source_item_id") or ""),
+            },
+            "tags": [],
+            "variations": [],
+            "workspace_meta": {
+                "who_made": "i_did",
+                "what_is_it": "a_finished_product",
+                "when_made": "made_to_order",
+                "renewal": "manual",
+                "listing_type": "physical",
+                "personalization": "off",
+                "section": "",
+                "sku": "",
+                "quantity": "1",
+                "variation_preset": "custom",
+            },
+        }
+
+    return _render_index(
+        request,
+        active_tab="workspace",
+        status=f"Draft yüklendi: {listing_id}. Düzenleyip update edebilirsin.",
+        workspace_draft=draft_obj,
+        workspace_price=str(selected.get("price") or "19.99"),
+        workspace_listing_id=str(listing_id),
+    )
+
+
+@app.post("/drafts/delete", response_class=HTMLResponse)
+def drafts_delete(request: Request, listing_id: int = Form(...)) -> HTMLResponse:
+    try:
+        delete_listing(int(listing_id))
+    except Exception as exc:
+        return _render_index(
+            request,
+            active_tab="drafts",
+            error=f"Etsy listing silinemedi ({listing_id}): {exc}",
+        )
+    removed = _delete_app_draft_listing(listing_id)
+    if removed:
+        return _render_index(
+            request,
+            active_tab="drafts",
+            status=f"Draft Etsy ve uygulamadan silindi: {listing_id}",
+        )
+    return _render_index(
+        request,
+        active_tab="drafts",
+        status=f"Etsy listing silindi, yerel kayıt zaten yoktu: {listing_id}",
+    )
+
+
+@app.post("/presets/save", response_class=HTMLResponse)
+def presets_save(
+    request: Request,
+    shirt_type1_name: str = Form("Size"),
+    shirt_type1_options: str = Form(""),
+    shirt_type2_name: str = Form("Color"),
+    shirt_type2_options: str = Form(""),
+    sweat_type1_name: str = Form("Size"),
+    sweat_type1_options: str = Form(""),
+    sweat_type2_name: str = Form("Color"),
+    sweat_type2_options: str = Form(""),
+    cc_type1_name: str = Form("Size"),
+    cc_type1_options: str = Form(""),
+    cc_type2_name: str = Form("Color"),
+    cc_type2_options: str = Form(""),
+) -> HTMLResponse:
+    try:
+        _save_variation_presets_from_form(
+            {
+                "shirt_type1_name": shirt_type1_name,
+                "shirt_type1_options": shirt_type1_options,
+                "shirt_type2_name": shirt_type2_name,
+                "shirt_type2_options": shirt_type2_options,
+                "sweat_type1_name": sweat_type1_name,
+                "sweat_type1_options": sweat_type1_options,
+                "sweat_type2_name": sweat_type2_name,
+                "sweat_type2_options": sweat_type2_options,
+                "cc_type1_name": cc_type1_name,
+                "cc_type1_options": cc_type1_options,
+                "cc_type2_name": cc_type2_name,
+                "cc_type2_options": cc_type2_options,
+            }
+        )
+        return _render_index(request, active_tab="presets", status="Presetler kaydedildi.")
+    except Exception as exc:
+        return _render_index(request, active_tab="presets", error=str(exc))
 
 
 @app.post("/workspace/scrape", response_class=HTMLResponse)
@@ -313,6 +768,7 @@ def workspace_scrape(
                 "sku": "",
                 "quantity": "1",
                 "variation_preset": "custom",
+                "category_taxonomy": "tshirts",
             }
         return _render_index(
             request,
@@ -334,7 +790,6 @@ def workspace_publish(
     draft_json: str = Form(...),
     price: str = Form("19.99"),
     etsy_update_listing_id: str = Form(""),
-    apply_variations: bool = Form(False),
 ) -> HTMLResponse:
     try:
         draft = json.loads(draft_json)
@@ -353,6 +808,7 @@ def workspace_publish(
                 quantity=1,
             )
             status = f"Etsy listing güncellendi: {listing_id}"
+            _save_app_draft_listing(listing_id=listing_id, draft=draft, price=price, mode="update")
         else:
             listing_opts, mp_note = _draft_listing_create_args(draft)
             result = create_draft_listing(
@@ -366,16 +822,16 @@ def workspace_publish(
             status = f"Etsy draft oluşturuldu: {listing_id}"
             if mp_note:
                 status += " | " + mp_note
+            _save_app_draft_listing(listing_id=listing_id, draft=draft, price=price, mode="create")
 
         raw_imgs = draft.get("images") or []
         images = [x for x in raw_imgs if isinstance(x, str) and x.strip()][:20]
         if images:
             status += " | " + _upload_images_best_effort(listing_id, images)
 
-        if apply_variations:
-            variation_status = _apply_variations(listing_id, draft, price)
-            if variation_status:
-                status += f" | {variation_status}"
+        variation_status = _apply_variations(listing_id, draft, price)
+        if variation_status:
+            status += f" | {variation_status}"
 
         return _render_index(
             request,

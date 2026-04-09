@@ -279,8 +279,8 @@ def _js_array_inner_after_open_bracket(block: str, open_bracket_idx: int) -> Opt
 
 def _extract_color_images_initial_hires(html: str) -> list[str]:
     """
-    ImageBlockATF içindeki colorImages.initial dizisi: her kare için canonical hiRes URL'leri
-    (Amazon sol şeritte renk swatch'ları gösterir; asıl galeri sırası burada).
+    ImageBlockATF içindeki colorImages.initial dizisi.
+    Not: Görseli yapay olarak "yükseltmek" yerine sayfadaki display/main URL'yi tercih eder.
     """
     ib = re.search(r"ImageBlockATF", html, re.I)
     window = html[ib.start() : ib.start() + 220_000] if ib else html
@@ -295,14 +295,67 @@ def _extract_color_images_initial_hires(html: str) -> list[str]:
     inner = _js_array_inner_after_open_bracket(window, open_idx)
     if not inner:
         return []
+    # initial dizisindeki top-level object bloklarını çıkar.
+    objects: list[str] = []
+    depth = 0
+    in_string = False
+    quote = ""
+    escape = False
+    start = -1
+    for i, ch in enumerate(inner):
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == quote:
+                in_string = False
+            continue
+        if ch in "\"'":
+            in_string = True
+            quote = ch
+            continue
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                objects.append(inner[start : i + 1])
+                start = -1
+
     urls: list[str] = []
-    for mm in re.finditer(
-        r'\{"hiRes"\s*:\s*"(https://m\.media-amazon\.com/images/I/[^"]+)"',
-        inner,
-    ):
-        u = mm.group(1).strip()
-        if u and not _is_low_res_or_overlay_image(u):
-            urls.append(u)
+    for obj in objects:
+        if '"hiRes"' not in obj:
+            continue
+        candidates: list[tuple[int, str]] = []
+        for m2 in re.finditer(
+            r'"(https://m\.media-amazon\.com/images/I/[^"]+)"\s*:\s*\[(\d+)\s*,\s*(\d+)\]',
+            obj,
+        ):
+            u = m2.group(1).strip()
+            if _is_low_res_or_overlay_image(u):
+                continue
+            try:
+                area = int(m2.group(2)) * int(m2.group(3))
+            except Exception:
+                area = 0
+            candidates.append((area, u))
+        chosen: Optional[str] = None
+        if candidates:
+            # "main" dictionary'deki sayfa-görüntü URL'si (örn _SX679_/_SY879_) öncelik.
+            chosen = sorted(candidates, key=lambda x: x[0], reverse=True)[0][1]
+        if not chosen:
+            m3 = re.search(r'"large"\s*:\s*"(https://m\.media-amazon\.com/images/I/[^"]+)"', obj)
+            if m3:
+                chosen = m3.group(1).strip()
+        if not chosen:
+            m4 = re.search(r'"hiRes"\s*:\s*"(https://m\.media-amazon\.com/images/I/[^"]+)"', obj)
+            if m4:
+                chosen = m4.group(1).strip()
+        if chosen and not _is_low_res_or_overlay_image(chosen):
+            urls.append(chosen)
     return urls
 
 
