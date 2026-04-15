@@ -14,6 +14,30 @@ import httpx
 
 
 ETSY_API = "https://api.etsy.com/v3"
+_ETSY_TAG_MAX_COUNT = 13
+_ETSY_TAG_MAX_LEN = 20
+
+
+def _normalize_tags(tags: Optional[list[str]]) -> list[str]:
+    if not isinstance(tags, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in tags:
+        if not isinstance(raw, str):
+            continue
+        t = " ".join(raw.strip().lower().split())
+        if not t:
+            continue
+        if len(t) > _ETSY_TAG_MAX_LEN:
+            t = t[:_ETSY_TAG_MAX_LEN].rstrip(" -_")
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        if len(out) >= _ETSY_TAG_MAX_COUNT:
+            break
+    return out
 
 
 def _x_api_key_value() -> str:
@@ -219,6 +243,7 @@ def create_draft_listing(
     is_supply: bool = False,
     shipping_profile_id: Optional[int] = None,
     readiness_state_id: Optional[int] = None,
+    tags: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """
     Etsy listing.state = draft oluşturur.
@@ -256,6 +281,9 @@ def create_draft_listing(
     # Fiziksel listing'ler için readiness_state_id çoğu durumda gereklidir.
     if ready is not None:
         payload["readiness_state_id"] = str(ready)
+    norm_tags = _normalize_tags(tags)
+    if norm_tags:
+        payload["tags"] = ",".join(norm_tags)
 
     url = f"{ETSY_API}/application/shops/{sid}/listings"
     with httpx.Client(timeout=60.0) as client:
@@ -274,6 +302,7 @@ def update_existing_listing(
     description: Optional[str] = None,
     price: Optional[str] = None,
     quantity: Optional[int] = None,
+    tags: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """
     Mevcut bir Etsy listing'i (özellikle draft) günceller.
@@ -288,6 +317,9 @@ def update_existing_listing(
         payload["price"] = str(price)
     if quantity is not None:
         payload["quantity"] = str(quantity)
+    norm_tags = _normalize_tags(tags)
+    if norm_tags:
+        payload["tags"] = ",".join(norm_tags)
 
     if not payload:
         return {"warning": "Güncellenecek alan verilmedi."}

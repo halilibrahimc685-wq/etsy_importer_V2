@@ -1,28 +1,45 @@
 from __future__ import annotations
 
+import copy
 import json
+import logging
 import os
+import re
 import time
+import urllib.request
 from datetime import datetime, timezone
+from uuid import uuid4
 from pathlib import Path
-from typing import Any, Optional
-from urllib.parse import urlparse
+from typing import Any, Awaitable, Callable, Optional
+from urllib.parse import quote, unquote, urlparse
 
+import httpx
+from PIL import Image
 from dotenv import load_dotenv
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse
 from fastapi.responses import HTMLResponse
+from fastapi.responses import RedirectResponse
+from fastapi.responses import Response
 from fastapi.templating import Jinja2Templates
 
 from etsy_client import (
     create_draft_listing,
-    delete_listing,
-    list_shop_shipping_profiles,
     normalize_listing_who_when_supply,
     update_existing_listing,
-    update_listing_inventory,
     upload_listing_image_from_url,
 )
 from main import fetch_html_simple
+from amazon_scraper import canonical_amazon_dp_url, is_amazon_cdn_product_image_url
+from mockup_engine import (
+    MockupProcessingConfig,
+    SUPPORTED_EXTENSIONS,
+    calculate_luminance,
+    collect_mockup_images,
+    compose_mockup,
+    process_all,
+    resolve_placement,
+)
 from scraper import parse_rendered_html, scrape_with_playwright, to_draft_dict
 
 load_dotenv()
@@ -30,166 +47,411 @@ load_dotenv()
 app = FastAPI(title="Amazon -> Etsy Importer")
 templates = Jinja2Templates(directory="templates")
 
-# Etsy shipping listesi her tam sayfa render'da API'yi vurmaması için kısa önbellek.
-_SHIP_PROF_CACHE_TTL_SEC = 120.0
-_ship_prof_cache_mono: float = 0.0
-_ship_prof_cache_value: Optional[tuple[list[dict[str, Any]], Optional[str]]] = None
-APP_DRAFTS_FILE = Path("drafts") / "app_draft_listings.json"
-PRESETS_FILE = Path("drafts") / "variation_presets.json"
-CATEGORY_TAXONOMY_MAP = {
-    "tshirts": 482,       # Clothing > Gender-Neutral Adult Clothing > Tops & Tees > T-shirts
-    "sweatshirts": 2202,  # Clothing > Gender-Neutral Adult Clothing > Hoodies & Sweatshirts > Sweatshirts
-}
 
-DEFAULT_VARIATION_PRESETS: dict[str, Any] = {
-    "shirt": {
-        "label": "Shirt",
-        "type1": {
-            "name": "Size",
-            "options": [
-                "Unisex Adult T-Shirt - S",
-                "Unisex Adult T-Shirt - M",
-                "Unisex Adult T-Shirt - L",
-                "Unisex Adult T-Shirt - XL",
-                "Unisex Adult T-Shirt - 2XL",
-                "Unisex Adult T-Shirt - 3XL",
-                "Youth - S",
-                "Youth - M",
-                "Youth - L",
-                "Youth - XL",
-                "Toddler - 2T",
-                "Toddler - 3T",
-                "Toddler - 4T",
-                "Toddler - 5T",
-                "Baby Onesie 3 - 6 Mos.",
-                "Baby Onesie 6 - 12 Mos.",
-                "Baby Onesie 12 - 18 Mos.",
-                "Baby Onesie 18 - 24 Mos.",
-            ],
-            "prices": [],
+def amazon_image_display_url(raw: Optional[str]) -> str:
+    """Tarayıcı önizlemesi: Amazon CDN bazen doğrudan <img> ile engellenir; kendi sunucumuzdan servis."""
+    try:
+        u = (raw if isinstance(raw, str) else str(raw or "")).strip()
+        if not u or not is_amazon_cdn_product_image_url(u):
+            return u
+        return "/media/amazon-image?u=" + quote(u, safe="")
+    except Exception:
+        return (raw or "").strip() if isinstance(raw, str) else ""
+
+
+def _jinja_filter_amazon_display(value: Any) -> str:
+    return amazon_image_display_url(None if value is None else str(value))
+
+
+templates.env.filters["amazon_display"] = _jinja_filter_amazon_display
+
+
+@app.middleware("http")
+async def _log_unhandled_exceptions(
+    request: Request, call_next: Callable[[Request], Awaitable[Any]]
+) -> Any:
+    try:
+        return await call_next(request)
+    except Exception:
+        logging.getLogger("uvicorn.error").exception(
+            "İstek: %s %s", request.method, request.url.path
+        )
+        raise
+
+
+def _workspace_draft_stripped_for_storage(draft: Any) -> Any:
+    """workspace_states.json — debug çok büyük / bazen JSON dışı tipler; kayıtta atılır."""
+    if not isinstance(draft, dict):
+        return draft
+    out = copy.deepcopy(draft)
+    out.pop("debug", None)
+    return out
+
+APP_DRAFTS_FILE = Path("drafts") / "app_draft_listings.json"
+WORKSPACE_STATES_FILE = Path("drafts") / "workspace_states.json"
+WORKSPACE_MOCKUPS_ROOT = Path("drafts") / "mockups_generated" / "_workspace"
+WORKSPACE_DESIGNS_ROOT = Path("drafts") / "_workspace_designs"
+_ETSY_TAG_MAX_LEN = 20
+_ETSY_TAG_MAX_COUNT = 13
+
+
+def _mockups_root() -> Path:
+    raw = (os.environ.get("MOCKUPS_DIR") or "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return (Path(__file__).resolve().parent / "Mockups").resolve()
+
+
+def _mockup_rel_url(rel: str) -> str:
+    """URL path: /media/mockups/... (segment başına quote)."""
+    parts = [p for p in rel.replace("\\", "/").split("/") if p and p != "."]
+    return "/media/mockups/" + "/".join(quote(p, safe="") for p in parts)
+
+
+def _safe_mockup_file_path(rel: str) -> Optional[Path]:
+    root = _mockups_root()
+    if not root.is_dir():
+        return None
+    rel_norm = (rel or "").strip().replace("\\", "/")
+    if not rel_norm or ".." in rel_norm.split("/"):
+        return None
+    candidate = (root / rel_norm).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    if not candidate.is_file():
+        return None
+    if candidate.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        return None
+    return candidate
+
+
+def _list_mockup_catalog() -> list[dict[str, Any]]:
+    root = _mockups_root()
+    if not root.is_dir():
+        return []
+    categories: list[dict[str, Any]] = []
+    for child in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+        if child.is_dir():
+            imgs = collect_mockup_images(child)
+            if not imgs:
+                continue
+            imgs_sorted = sorted(imgs, key=lambda p: str(p).lower())
+            rels: list[dict[str, str]] = []
+            for img in imgs_sorted:
+                try:
+                    rel = img.relative_to(root).as_posix()
+                except ValueError:
+                    continue
+                rels.append(
+                    {
+                        "rel": rel,
+                        "filename": img.name,
+                        "url": _mockup_rel_url(rel),
+                    }
+                )
+            if rels:
+                categories.append(
+                    {
+                        "id": child.name,
+                        "title": child.name,
+                        "count": len(rels),
+                        "cover_rel": rels[0]["rel"],
+                        "images": rels,
+                    }
+                )
+        elif child.is_file() and child.suffix.lower() in SUPPORTED_EXTENSIONS:
+            rel = child.name
+            url = _mockup_rel_url(rel)
+            categories.append(
+                {
+                    "id": f"file:{child.name}",
+                    "title": child.stem,
+                    "count": 1,
+                    "cover_rel": rel,
+                    "images": [{"rel": rel, "filename": child.name, "url": url}],
+                }
+            )
+    return categories
+
+
+def _is_mockup_media_url(u: str) -> bool:
+    return u.startswith("/media/mockups/") or u.startswith("/media/workspace-mockups/")
+
+
+def _workspace_mockup_rel_url(rel: str) -> str:
+    parts = [p for p in rel.replace("\\", "/").split("/") if p and p != "."]
+    return "/media/workspace-mockups/" + "/".join(quote(p, safe="") for p in parts)
+
+
+def _safe_workspace_mockup_file_path(rel: str) -> Optional[Path]:
+    root = WORKSPACE_MOCKUPS_ROOT.resolve()
+    if not root.is_dir():
+        return None
+    rel_norm = (rel or "").strip().replace("\\", "/")
+    if not rel_norm or ".." in rel_norm.split("/"):
+        return None
+    candidate = (root / rel_norm).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    if not candidate.is_file():
+        return None
+    if candidate.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        return None
+    return candidate
+
+
+def _template_paths_from_urls(urls: list[str], root: Path) -> list[Path]:
+    out: list[Path] = []
+    seen: set[str] = set()
+    for raw in urls:
+        u = str(raw or "").strip()
+        if not u.startswith("/media/mockups/"):
+            continue
+        rel = unquote(u[len("/media/mockups/") :]).strip().replace("\\", "/")
+        if not rel or ".." in rel.split("/"):
+            continue
+        p = (root / rel).resolve()
+        try:
+            p.relative_to(root.resolve())
+        except ValueError:
+            continue
+        if not p.is_file() or p.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            continue
+        key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
+def _process_selected_mockups(
+    cfg: MockupProcessingConfig,
+    selected_paths: list[Path],
+    log_callback: Optional[Callable[[str], None]] = None,
+) -> tuple[list[Path], int]:
+    out_paths: list[Path] = []
+    failed = 0
+    root = cfg.mockups_root.resolve()
+    for mockup in selected_paths:
+        try:
+            rel = mockup.resolve().relative_to(root)
+            out_path = cfg.output_root / rel.with_suffix(".png")
+            placement = resolve_placement(cfg, mockup)
+            with Image.open(mockup) as preview:
+                lum = calculate_luminance(preview)
+            design_to_use = (
+                cfg.light_design_path
+                if lum < placement.luminance_threshold
+                else cfg.dark_design_path
+            )
+            compose_mockup(
+                mockup_path=mockup,
+                selected_design_path=design_to_use,
+                output_path=out_path,
+                design_width_percent=placement.design_width_percent,
+                design_y_offset_percent=placement.design_y_offset_percent,
+                design_x_offset_percent=placement.design_x_offset_percent,
+            )
+            out_paths.append(out_path)
+            if log_callback:
+                log_callback(f"OK {rel.as_posix()}")
+        except Exception as exc:
+            failed += 1
+            if log_callback:
+                log_callback(f"FAIL {mockup.name}: {exc}")
+    return out_paths, failed
+
+
+async def _save_uploaded_design_file(upload: UploadFile, *, batch_id: str, role: str) -> Path:
+    filename = (upload.filename or "").strip()
+    ext = Path(filename).suffix.lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise RuntimeError(f"{role} design dosyası png/jpg/jpeg/webp olmalı.")
+    content = await upload.read()
+    if not content:
+        raise RuntimeError(f"{role} design dosyası boş.")
+    if len(content) > 20 * 1024 * 1024:
+        raise RuntimeError(f"{role} design dosyası çok büyük (max 20MB).")
+    WORKSPACE_DESIGNS_ROOT.mkdir(parents=True, exist_ok=True)
+    out = WORKSPACE_DESIGNS_ROOT / f"{batch_id}_{role}{ext}"
+    out.write_bytes(content)
+    return out
+
+
+async def _save_uploaded_design_file(upload: UploadFile, *, batch_id: str, role: str) -> Path:
+    filename = (upload.filename or "").strip()
+    ext = Path(filename).suffix.lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise RuntimeError(f"{role} design dosyası png/jpg/jpeg/webp olmalı.")
+    content = await upload.read()
+    if not content:
+        raise RuntimeError(f"{role} design dosyası boş.")
+    if len(content) > 20 * 1024 * 1024:
+        raise RuntimeError(f"{role} design dosyası çok büyük (max 20MB).")
+    WORKSPACE_DESIGNS_ROOT.mkdir(parents=True, exist_ok=True)
+    out = WORKSPACE_DESIGNS_ROOT / f"{batch_id}_{role}{ext}"
+    out.write_bytes(content)
+    return out
+
+
+def _normalize_tag_phrase(raw: str) -> str:
+    s = re.sub(r"\s+", " ", (raw or "").strip().lower())
+    s = re.sub(r"[^a-z0-9 '&-]", "", s)
+    s = s.strip(" -&'")
+    if not s:
+        return ""
+    if len(s) > _ETSY_TAG_MAX_LEN:
+        s = s[:_ETSY_TAG_MAX_LEN].rstrip(" -&'")
+    return s
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for v in values:
+        n = _normalize_tag_phrase(v)
+        if not n or n in seen:
+            continue
+        seen.add(n)
+        out.append(n)
+    return out
+
+
+def _fallback_etsy_tags(keywords: list[str], title: str) -> list[str]:
+    kws = _dedupe_preserve_order([str(x) for x in keywords if isinstance(x, str)])
+    title_words = [
+        w
+        for w in re.findall(r"[a-z0-9][a-z0-9'-]{1,}", (title or "").lower())
+        if len(w) >= 3
+    ]
+    title_kws = _dedupe_preserve_order(title_words)
+    merged = kws + [w for w in title_kws if w not in kws]
+
+    tags: list[str] = []
+    for kw in merged:
+        tags.append(kw)
+        if len(tags) >= _ETSY_TAG_MAX_COUNT:
+            break
+        if " " not in kw:
+            # Try producing short 2-word phrases from neighboring terms.
+            for nxt in merged:
+                if nxt == kw or " " in nxt:
+                    continue
+                phrase = _normalize_tag_phrase(f"{kw} {nxt}")
+                if phrase and phrase not in tags and len(phrase) <= _ETSY_TAG_MAX_LEN:
+                    tags.append(phrase)
+                    break
+        if len(tags) >= _ETSY_TAG_MAX_COUNT:
+            break
+    return _dedupe_preserve_order(tags)[:_ETSY_TAG_MAX_COUNT]
+
+
+def _ai_rewrite_etsy_tags(keywords: list[str], title: str) -> list[str]:
+    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        return []
+    model = (os.environ.get("OPENAI_MODEL") or "gpt-4o-mini").strip()
+    payload = {
+        "model": model,
+        "temperature": 0.2,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You generate Etsy SEO tags. Return strict JSON object with key "
+                    "'tags' as array of up to 13 lowercase strings, each <=20 chars."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "title": title or "",
+                        "keywords": keywords,
+                        "constraints": {
+                            "max_tags": _ETSY_TAG_MAX_COUNT,
+                            "max_chars_per_tag": _ETSY_TAG_MAX_LEN,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ],
+    }
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+        resp.raise_for_status()
+        data = resp.json()
+        txt = (
+            data.get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+        )
+        parsed = json.loads(txt) if isinstance(txt, str) else {}
+        raw_tags = parsed.get("tags") if isinstance(parsed, dict) else []
+        if not isinstance(raw_tags, list):
+            return []
+        cleaned = _dedupe_preserve_order([str(x) for x in raw_tags])
+        return cleaned[:_ETSY_TAG_MAX_COUNT]
+    except Exception:
+        return []
+
+
+def _generate_etsy_tags(keywords: list[str], title: str) -> tuple[list[str], str]:
+    ai_tags = _ai_rewrite_etsy_tags(keywords, title)
+    if ai_tags:
+        return ai_tags[:_ETSY_TAG_MAX_COUNT], "AI"
+    return [], "AI"
+
+
+def _etsy_placeholder_title() -> str:
+    return (os.environ.get("ETSY_DRAFT_PLACEHOLDER_TITLE") or "Draft — add listing details in Etsy")[:140]
+
+
+def _etsy_placeholder_description(source_url: str = "") -> str:
+    base = (os.environ.get("ETSY_DRAFT_PLACEHOLDER_DESCRIPTION") or "").strip()
+    if not base:
+        base = (
+            "Photos from Amazon listing (color variants). "
+            "Edit title, description, price, and inventory in Etsy."
+        )
+    if source_url.strip():
+        return f"{base}\n\nSource: {source_url.strip()}"[:49990]
+    return base[:49990]
+
+
+def _etsy_placeholder_price() -> str:
+    s = (os.environ.get("ETSY_DRAFT_PLACEHOLDER_PRICE") or "19.99").strip()
+    return s or "19.99"
+
+
+def _minimal_create_listing_kwargs() -> tuple[dict[str, Any], str]:
+    who, when, is_supply, note = normalize_listing_who_when_supply(
+        who_made="i_did", when_made="made_to_order", is_supply=False
+    )
+    return (
+        {
+            "who_made": who,
+            "when_made": when,
+            "is_supply": is_supply,
+            "taxonomy_id": None,
         },
-        "type2": {
-            "name": "Color",
-            "options": [
-                "Athletic Heather",
-                "Black",
-                "Dark Grey Heather",
-                "Heather Columbia Blue",
-                "Heather Maroon",
-                "Heather Mauve",
-                "Heather Navy",
-                "Heather Peach",
-                "Kelly Green",
-                "Orange",
-                "Pink",
-                "Red",
-                "Soft Cream",
-                "White",
-            ],
-        },
-    },
-    "sweatshirt": {
-        "label": "Sweatshirt & Hoodie",
-        "type1": {
-            "name": "Size",
-            "options": [
-                "Unisex Crewneck - S",
-                "Unisex Crewneck - M",
-                "Unisex Crewneck - L",
-                "Unisex Crewneck - XL",
-                "Unisex Crewneck - 2XL",
-                "Unisex Crewneck - 3XL",
-                "Unisex Hoodie - S",
-                "Unisex Hoodie - M",
-                "Unisex Hoodie - L",
-                "Unisex Hoodie - XL",
-                "Unisex Hoodie - 2XL",
-                "Unisex Hoodie - 3XL",
-                "Youth Crewneck - S",
-                "Youth Crewneck - M",
-                "Youth Crewneck - L",
-                "Youth Crewneck - XL",
-                "Youth Hoodie - S",
-                "Youth Hoodie - M",
-                "Youth Hoodie - L",
-                "Youth Hoodie - XL",
-            ],
-            "prices": [],
-        },
-        "type2": {
-            "name": "Color",
-            "options": [
-                "White",
-                "Black",
-                "Forest",
-                "Irish Green",
-                "Light Blue",
-                "Light Pink",
-                "Maroon",
-                "Military Green",
-                "Navy",
-                "Orange",
-                "Red",
-                "Sand",
-                "Sport Grey",
-            ],
-        },
-    },
-    "comfort_colors": {
-        "label": "Comfort Colors",
-        "type1": {
-            "name": "Size",
-            "options": [
-                "CC Unisex T-shirt - S",
-                "CC Unisex T-shirt - M",
-                "CC Unisex T-shirt - L",
-                "CC Unisex T-shirt - XL",
-                "CC Unisex T-shirt - 2XL",
-                "CC Unisex T-shirt - 3XL",
-                "CC Unisex T-shirt - 4XL",
-                "CC Unisex Long Sleeve Shirt - S",
-                "CC Unisex Long Sleeve Shirt - M",
-                "CC Unisex Long Sleeve Shirt - L",
-                "CC Unisex Long Sleeve Shirt - XL",
-                "CC Unisex Long Sleeve Shirt - 2XL",
-                "CC Unisex Long Sleeve Shirt - 3XL",
-                "CC Youth T-shirt - S",
-                "CC Youth T-shirt - M",
-                "CC Youth T-shirt - L",
-                "CC Youth T-shirt - XL",
-                "CC Unisex Sweatshirt - S",
-                "CC Unisex Sweatshirt - M",
-                "CC Unisex Sweatshirt - L",
-                "CC Unisex Sweatshirt - XL",
-                "CC Unisex Sweatshirt - 2XL",
-                "CC Unisex Sweatshirt - 3XL",
-            ],
-            "prices": [],
-        },
-        "type2": {
-            "name": "Color",
-            "options": [
-                "Light Green",
-                "Moss",
-                "Black",
-                "Pepper",
-                "Gray",
-                "Blue Jean",
-                "Chalky Mint",
-                "Violet",
-                "Orchid",
-                "White",
-                "Ivory",
-                "Mustard",
-                "Red",
-                "Crimson",
-                "Yam",
-                "Berry",
-                "Blossom",
-            ],
-        },
-    },
-}
+        note,
+    )
 
 
 def _validate_amazon_url(url: str) -> None:
@@ -201,78 +463,17 @@ def _validate_amazon_url(url: str) -> None:
         raise RuntimeError("Yalnızca Amazon ürün URL destekleniyor.")
 
 
-def _apply_variations(listing_id: int, draft: dict[str, Any], price: str) -> Optional[str]:
-    vars_ = draft.get("variations")
-    if not vars_ or not isinstance(vars_, list):
-        return None
-
-    vars_ = vars_[:2]
-    property_ids = [513, 514][: len(vars_)]
-
-    value_lists: list[list[str]] = []
-    names: list[str] = []
-    for v in vars_:
-        if not isinstance(v, dict):
-            continue
-        names.append(str(v.get("name") or "Variation"))
-        vals = [str(x) for x in (v.get("values") or [])]
-        value_lists.append(vals or ["Default"])
-
-    combos: list[list[str]] = [[]]
-    for vals in value_lists:
-        combos = [c + [val] for c in combos for val in vals]
-
-    readiness_state_id: Optional[int] = None
-    try:
-        raw_ready = (os.environ.get("ETSY_READINESS_STATE_ID") or "").strip()
-        if raw_ready:
-            readiness_state_id = int(raw_ready)
-    except ValueError:
-        readiness_state_id = None
-    if readiness_state_id is None:
-        raise RuntimeError(
-            "Varyasyon (inventory) güncellemesi için her satış teklifinde readiness state gerekir. "
-            ".env dosyasına ETSY_READINESS_STATE_ID ekleyin (draft listing oluştururken kullandığınız ID, "
-            "Etsy Satıcı Paneli → Shop Manager’da readiness/shipping ayarlarınızdan doğrulanabilir)."
-        )
-
-    meta_v = draft.get("workspace_meta")
-    preset_key = "custom"
-    if isinstance(meta_v, dict):
-        preset_key = str(meta_v.get("variation_preset") or "custom").strip()
-
-    products = []
-    for combo in combos:
-        prop_values = []
-        for idx, val in enumerate(combo):
-            prop_values.append(
-                {
-                    "property_id": property_ids[idx],
-                    "property_name": names[idx],
-                    "values": [val],
-                }
-            )
-        offering_price = _offering_price_for_combo(combo, names, preset_key, price)
-        offering = {
-            "price": offering_price,
-            "quantity": 1,
-            "is_enabled": True,
-            "readiness_state_id": readiness_state_id,
-        }
-        products.append(
-            {
-                "sku": "",
-                "property_values": prop_values,
-                "offerings": [dict(offering)],
-            }
-        )
-
-    update_listing_inventory(
-        listing_id=int(listing_id),
-        products=products,
-        property_ids=property_ids,
-    )
-    return f"Varyasyonlar uygulandı ({len(products)} kombinasyon)."
+def _public_image_fetch_url(url: str) -> str:
+    """Etsy yüklemesi için httpx'in GET atabileceği mutlak URL (yerel /media/... için)."""
+    u = (url or "").strip()
+    if not u:
+        return u
+    if u.startswith("http://") or u.startswith("https://"):
+        return u
+    if u.startswith("/"):
+        base = (os.environ.get("APP_PUBLIC_URL") or "http://127.0.0.1:8000").rstrip("/")
+        return base + u
+    return u
 
 
 def _upload_images_best_effort(listing_id: int, images: list[Any]) -> str:
@@ -288,7 +489,8 @@ def _upload_images_best_effort(listing_id: int, images: list[Any]) -> str:
             continue
         seen.add(url)
         try:
-            upload_listing_image_from_url(listing_id, url, rank=rank, overwrite=True)
+            fetch_url = _public_image_fetch_url(url)
+            upload_listing_image_from_url(listing_id, fetch_url, rank=rank, overwrite=True)
             uploaded += 1
             rank += 1
         except Exception as ex:
@@ -332,15 +534,14 @@ def _save_app_draft_listing(*, listing_id: int, draft: dict[str, Any], price: st
     APP_DRAFTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     rows = _load_app_draft_listings(limit=500)
     src = draft.get("source") if isinstance(draft.get("source"), dict) else {}
-    meta = draft.get("workspace_meta") if isinstance(draft.get("workspace_meta"), dict) else {}
     row = {
         "listing_id": int(listing_id),
         "etsy_listing_id": int(listing_id),
-        "title": str(draft.get("title") or "")[:140],
-        "price": str(price or ""),
-        "sku": str(meta.get("sku") or ""),
-        "variation_preset": str(meta.get("variation_preset") or "custom"),
-        "section": str(meta.get("section") or ""),
+        "title": str(draft.get("title") or _etsy_placeholder_title())[:140],
+        "price": str(price or _etsy_placeholder_price()),
+        "sku": "",
+        "variation_preset": "",
+        "section": "",
         "image": (draft.get("images") or [None])[0] if isinstance(draft.get("images"), list) else None,
         "source_url": str(src.get("url") or ""),
         "amazon_url": str(src.get("url") or ""),
@@ -370,6 +571,90 @@ def _save_app_draft_listing(*, listing_id: int, draft: dict[str, Any], price: st
     APP_DRAFTS_FILE.write_text(json.dumps(rows[:500], ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _normalize_amazon_url(url: str) -> str:
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    try:
+        p = urlparse(raw)
+    except Exception:
+        return raw.lower()
+    host = (p.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    path = (p.path or "").rstrip("/")
+    return f"{host}{path}".lower()
+
+
+def _extract_asin_from_text(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    m = re.search(r"\b([A-Z0-9]{10})\b", raw.upper())
+    return m.group(1) if m else ""
+
+
+def _find_existing_draft_match(url: str, asin: str = "") -> Optional[dict[str, Any]]:
+    want_url = _normalize_amazon_url(url)
+    want_asin = _extract_asin_from_text(asin)
+    if not want_url and not want_asin:
+        return None
+    for row in _load_app_draft_listings(limit=500):
+        row_url = _normalize_amazon_url(str(row.get("amazon_url") or row.get("source_url") or ""))
+        row_asin = _extract_asin_from_text(str(row.get("source_item_id") or ""))
+        if want_url and row_url and want_url == row_url:
+            return row
+        if want_asin and row_asin and want_asin == row_asin:
+            return row
+    return None
+
+
+def _load_workspace_states() -> dict[str, Any]:
+    try:
+        if not WORKSPACE_STATES_FILE.exists():
+            return {}
+        raw = json.loads(WORKSPACE_STATES_FILE.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_workspace_state(payload: dict[str, Any]) -> str:
+    states = _load_workspace_states()
+    # lightweight cleanup of stale entries
+    now = time.time()
+    keep: dict[str, Any] = {}
+    for k, v in states.items():
+        if not isinstance(v, dict):
+            continue
+        ts = v.get("_ts")
+        if isinstance(ts, (int, float)) and now - float(ts) < 2 * 24 * 3600:
+            keep[k] = v
+    state_id = uuid4().hex
+    rec = dict(payload)
+    rec["_ts"] = now
+    if isinstance(rec.get("workspace_draft"), dict):
+        rec["workspace_draft"] = _workspace_draft_stripped_for_storage(rec["workspace_draft"])
+    keep[state_id] = rec
+    WORKSPACE_STATES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        text = json.dumps(keep, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):
+        for v in keep.values():
+            if isinstance(v, dict) and isinstance(v.get("workspace_draft"), dict):
+                v["workspace_draft"] = _workspace_draft_stripped_for_storage(v["workspace_draft"])
+                if isinstance(v["workspace_draft"], dict):
+                    v["workspace_draft"].pop("notes", None)
+        text = json.dumps(keep, ensure_ascii=False, indent=2)
+    WORKSPACE_STATES_FILE.write_text(text, encoding="utf-8")
+    return state_id
+
+
+def _redirect_workspace_state(payload: dict[str, Any]) -> RedirectResponse:
+    sid = _save_workspace_state(payload)
+    return RedirectResponse(url=f"/?state={sid}", status_code=303)
+
+
 def _delete_app_draft_listing(listing_id: int) -> bool:
     rows = _load_app_draft_listings(limit=500)
     target = int(listing_id)
@@ -394,368 +679,248 @@ def _delete_app_draft_listing(listing_id: int) -> bool:
     return removed
 
 
-def _load_variation_presets() -> dict[str, Any]:
-    data: dict[str, Any] = {}
-    try:
-        if PRESETS_FILE.exists():
-            raw = json.loads(PRESETS_FILE.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                data = raw
-    except Exception:
-        data = {}
-
-    merged = json.loads(json.dumps(DEFAULT_VARIATION_PRESETS, ensure_ascii=False))
-    for key, val in data.items():
-        if key not in merged or not isinstance(val, dict):
-            continue
-        for part in ("type1", "type2"):
-            if isinstance(val.get(part), dict):
-                if isinstance(val[part].get("name"), str):
-                    merged[key][part]["name"] = val[part]["name"].strip() or merged[key][part]["name"]
-                if isinstance(val[part].get("options"), list):
-                    opts = [str(x).strip() for x in val[part]["options"] if str(x).strip()]
-                    if opts:
-                        merged[key][part]["options"] = opts
-                if isinstance(val[part].get("prices"), list):
-                    merged[key][part]["prices"] = [
-                        str(x).strip() for x in val[part]["prices"]
-                    ]
-    for block in merged.values():
-        if not isinstance(block, dict):
-            continue
-        for part in ("type1", "type2"):
-            p = block.get(part)
-            if isinstance(p, dict) and "prices" not in p:
-                p["prices"] = []
-    return merged
-
-
-def _preset_type1_price_by_option(preset_key: str, base_price: str) -> dict[str, float]:
-    """Birincil seçenek (genelde beden) metni -> Etsy offering fiyatı."""
-    base_s = (base_price or "19.99").strip() or "19.99"
-    try:
-        base_f = float(base_s)
-    except ValueError:
-        base_f = 19.99
-    raw = _load_variation_presets().get(preset_key)
-    if not isinstance(raw, dict):
-        return {}
-    t1 = raw.get("type1")
-    if not isinstance(t1, dict):
-        return {}
-    opts = t1.get("options")
-    if not isinstance(opts, list):
-        return {}
-    plist = t1.get("prices")
-    price_lines: list[str] = (
-        [str(x).strip() for x in plist] if isinstance(plist, list) else []
-    )
-    out: dict[str, float] = {}
-    for i, opt in enumerate(opts):
-        o = str(opt).strip()
-        if not o:
-            continue
-        cell = price_lines[i] if i < len(price_lines) else ""
-        use_s = cell if cell else base_s
-        try:
-            out[o] = float(use_s)
-        except ValueError:
-            out[o] = base_f
-    return out
-
-
-def _offering_price_for_combo(
-    combo: list[str],
-    dim_names: list[str],
-    preset_key: str,
-    base_price: str,
-) -> float:
-    base_s = (base_price or "19.99").strip() or "19.99"
-    try:
-        base_f = float(base_s)
-    except ValueError:
-        base_f = 19.99
-    if preset_key not in ("shirt", "sweatshirt", "comfort_colors"):
-        return base_f
-    presets_block = _load_variation_presets().get(preset_key)
-    if not isinstance(presets_block, dict):
-        return base_f
-    t1 = presets_block.get("type1")
-    if not isinstance(t1, dict):
-        return base_f
-    t1_name = str(t1.get("name") or "Size").strip().lower()
-    price_by_opt = _preset_type1_price_by_option(preset_key, base_price)
-    if not price_by_opt:
-        return base_f
-    idx = -1
-    for i, n in enumerate(dim_names):
-        if str(n).strip().lower() == t1_name:
-            idx = i
-            break
-    if idx < 0:
-        idx = 0
-    if idx >= len(combo):
-        return base_f
-    val = combo[idx]
-    return price_by_opt.get(val.strip(), base_f)
-
-
-def _opts_from_multivalue(form: dict[str, Any], key: str) -> list[str]:
-    """Formdan aynı isimli alanların listesi; boş ve yinelenenleri atlar (sıra korunur)."""
-    raw = form.get(key) or []
-    if not isinstance(raw, list):
-        raw = [raw]
-    out: list[str] = []
+def _normalize_images_only_draft(draft: dict[str, Any]) -> dict[str, Any]:
+    """Workspace için görsel kaynaklarını normalize eder (amazon/mockup)."""
+    assets = draft.get("workspace_assets")
+    if not isinstance(assets, dict):
+        assets = {}
+    imgs = [str(x).strip() for x in (draft.get("images") or []) if isinstance(x, str) and str(x).strip()]
+    prev_a = assets.get("amazon_images")
+    prev_m = assets.get("mockup_images")
+    prev_a_list = [str(x).strip() for x in prev_a] if isinstance(prev_a, list) else []
+    prev_m_list = [str(x).strip() for x in prev_m] if isinstance(prev_m, list) else []
+    from_amazon = [u for u in imgs if not _is_mockup_media_url(u)]
+    from_mockups = [u for u in imgs if _is_mockup_media_url(u)]
     seen: set[str] = set()
-    for x in raw:
-        v = str(x).strip()
-        if not v or v in seen:
+    amazon: list[str] = []
+    for u in prev_a_list + from_amazon:
+        if not u or _is_mockup_media_url(u) or u in seen:
             continue
-        seen.add(v)
-        out.append(v)
-    return out
-
-
-def _type1_opts_prices_from_form(
-    form: dict[str, Any], opt_key: str, price_key: str
-) -> tuple[list[str], list[str]]:
-    olist = form.get(opt_key) or []
-    plist = form.get(price_key) or []
-    if not isinstance(olist, list):
-        olist = [str(olist).strip()] if str(olist).strip() else []
-    else:
-        olist = [str(x).strip() for x in olist]
-    if not isinstance(plist, list):
-        plist = [str(plist).strip()] if str(plist).strip() else []
-    else:
-        plist = [str(x).strip() for x in plist]
-    opts_out: list[str] = []
-    prices_out: list[str] = []
-    n = max(len(olist), len(plist))
-    for i in range(n):
-        o = olist[i] if i < len(olist) else ""
-        p = plist[i] if i < len(plist) else ""
-        if not o:
+        seen.add(u)
+        amazon.append(u)
+    seen_m: set[str] = set()
+    mockups: list[str] = []
+    for u in prev_m_list + from_mockups:
+        if not u or not _is_mockup_media_url(u) or u in seen_m:
             continue
-        opts_out.append(o)
-        prices_out.append(p)
-    return opts_out, prices_out
-
-
-def _save_variation_presets_from_form(form: dict[str, Any]) -> None:
-    presets = _load_variation_presets()
-
-    presets["shirt"]["type1"]["name"] = str(form.get("shirt_type1_name") or "Size").strip() or "Size"
-    presets["shirt"]["type2"]["name"] = str(form.get("shirt_type2_name") or "Color").strip() or "Color"
-    so, sp = _type1_opts_prices_from_form(form, "shirt_type1_opts", "shirt_type1_opt_prices")
-    if so:
-        presets["shirt"]["type1"]["options"] = so
-        while len(sp) < len(so):
-            sp.append("")
-        presets["shirt"]["type1"]["prices"] = sp[: len(so)]
-    opts2 = _opts_from_multivalue(form, "shirt_type2_opts")
-    if opts2:
-        presets["shirt"]["type2"]["options"] = opts2
-
-    presets["sweatshirt"]["type1"]["name"] = (
-        str(form.get("sweat_type1_name") or "Size").strip() or "Size"
-    )
-    presets["sweatshirt"]["type2"]["name"] = (
-        str(form.get("sweat_type2_name") or "Color").strip() or "Color"
-    )
-    wo, wp = _type1_opts_prices_from_form(form, "sweat_type1_opts", "sweat_type1_opt_prices")
-    if wo:
-        presets["sweatshirt"]["type1"]["options"] = wo
-        while len(wp) < len(wo):
-            wp.append("")
-        presets["sweatshirt"]["type1"]["prices"] = wp[: len(wo)]
-    w2 = _opts_from_multivalue(form, "sweat_type2_opts")
-    if w2:
-        presets["sweatshirt"]["type2"]["options"] = w2
-
-    presets["comfort_colors"]["type1"]["name"] = (
-        str(form.get("cc_type1_name") or "Size").strip() or "Size"
-    )
-    presets["comfort_colors"]["type2"]["name"] = (
-        str(form.get("cc_type2_name") or "Color").strip() or "Color"
-    )
-    co, cp = _type1_opts_prices_from_form(form, "cc_type1_opts", "cc_type1_opt_prices")
-    if co:
-        presets["comfort_colors"]["type1"]["options"] = co
-        while len(cp) < len(co):
-            cp.append("")
-        presets["comfort_colors"]["type1"]["prices"] = cp[: len(co)]
-    c2 = _opts_from_multivalue(form, "cc_type2_opts")
-    if c2:
-        presets["comfort_colors"]["type2"]["options"] = c2
-
-    PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    PRESETS_FILE.write_text(json.dumps(presets, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _draft_listing_create_args(draft: dict[str, Any]) -> tuple[dict[str, Any], str]:
-    """create_draft_listing için who_made / when_made / is_supply ve opsiyonel uyarı."""
-    meta = draft.get("workspace_meta")
-    if not isinstance(meta, dict):
-        meta = {}
-    who = str(meta.get("who_made") or "i_did").strip()
-    what = str(meta.get("what_is_it") or "a_finished_product").strip()
-    when = str(meta.get("when_made") or "made_to_order").strip()
-    is_supply = what == "a_supply_or_tool"
-    who, when, is_supply, note = normalize_listing_who_when_supply(
-        who_made=who, when_made=when, is_supply=is_supply
-    )
-    cat_key = str(meta.get("category_taxonomy") or "tshirts").strip().lower()
-    taxonomy_id = CATEGORY_TAXONOMY_MAP.get(cat_key, CATEGORY_TAXONOMY_MAP["tshirts"])
-    opts: dict[str, Any] = {
-        "who_made": who,
-        "when_made": when,
-        "is_supply": is_supply,
-        "taxonomy_id": taxonomy_id,
-    }
-    ship_s = str(meta.get("shipping_profile_id") or "").strip()
-    if ship_s.isdigit():
-        opts["shipping_profile_id"] = int(ship_s)
-    return opts, note
-
-
-def _normalize_shipping_profiles_for_ui(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for p in raw:
-        pid = p.get("shipping_profile_id")
-        if pid is None:
-            pid = p.get("profile_id")
-        if pid is None:
-            continue
-        try:
-            pid_i = int(pid)
-        except (TypeError, ValueError):
-            continue
-        if p.get("is_deleted") is True:
-            continue
-        title = str(p.get("title") or p.get("name") or f"Profile {pid_i}")
-        rows.append({"id": pid_i, "title": title})
-    rows.sort(key=lambda x: (x["title"].lower(), x["id"]))
-    return rows
-
-
-def _etsy_shipping_profiles_display() -> tuple[list[dict[str, Any]], Optional[str]]:
-    global _ship_prof_cache_mono, _ship_prof_cache_value
-    now = time.monotonic()
-    if (
-        _ship_prof_cache_value is not None
-        and now - _ship_prof_cache_mono < _SHIP_PROF_CACHE_TTL_SEC
-    ):
-        return _ship_prof_cache_value
-    try:
-        raw = list_shop_shipping_profiles()
-        out: tuple[list[dict[str, Any]], Optional[str]] = (
-            _normalize_shipping_profiles_for_ui(raw),
-            None,
-        )
-    except Exception as exc:
-        out = ([], str(exc))
-    _ship_prof_cache_value = out
-    _ship_prof_cache_mono = now
-    return out
+        seen_m.add(u)
+        mockups.append(u)
+    assets["amazon_images"] = amazon
+    assets["mockup_images"] = mockups
+    active_raw = str(assets.get("active_source") or "").strip().lower()
+    active = active_raw if active_raw in {"amazon", "mockups"} else "amazon"
+    if active == "mockups" and not mockups and amazon:
+        active = "amazon"
+    assets["active_source"] = active
+    draft["workspace_assets"] = assets
+    draft["images"] = mockups if active == "mockups" else amazon
+    if "title" not in draft or not isinstance(draft.get("title"), str):
+        draft["title"] = ""
+    if "keywords" not in draft or not isinstance(draft.get("keywords"), list):
+        draft["keywords"] = []
+    if "tags" not in draft or not isinstance(draft.get("tags"), list):
+        draft["tags"] = []
+    draft["tags"] = _dedupe_preserve_order([str(x) for x in draft["tags"]])[:_ETSY_TAG_MAX_COUNT]
+    if "variations" not in draft or not isinstance(draft.get("variations"), list):
+        draft["variations"] = []
+    if "workspace_meta" in draft:
+        del draft["workspace_meta"]
+    return draft
 
 
 def _workspace_ui(draft: Optional[dict[str, Any]]) -> dict[str, Any]:
-    defaults_meta = {
-        "who_made": "i_did",
-        "what_is_it": "a_finished_product",
-        "when_made": "made_to_order",
-        "renewal": "manual",
-        "listing_type": "physical",
-        "personalization": "off",
-        "section": "",
-        "sku": "",
-        "quantity": "1",
-        "variation_preset": "custom",
-        "category_taxonomy": "tshirts",
-        "shipping_profile_id": "",
+    empty: dict[str, Any] = {
+        "has_draft": False,
+        "images": [],
+        "amazon_images": [],
+        "mockup_images": [],
+        "active_source": "amazon",
+        "source_url": "",
+        "item_id": "",
+        "image_count": 0,
+        "variations": [],
+        "title": "",
+        "keywords": [],
+        "tags": [],
     }
     if not draft:
-        return {
-            "has_draft": False,
-            "title": "",
-            "description": "",
-            "images": [],
-            "tags_str": "",
-            "source_url": "",
-            "item_id": "",
-            "price_display": "",
-            "variations_preview": "",
-            "variations": [],
-            **defaults_meta,
-        }
-    tags = draft.get("tags")
-    if not isinstance(tags, list):
-        tags = []
-    tags_str = ", ".join(str(t).strip() for t in tags if str(t).strip())
-    ph = draft.get("price_hint") or {}
-    pd = ""
-    if ph.get("display"):
-        pd = str(ph["display"])
-    elif ph.get("min") is not None:
-        pd = str(ph["min"])
-    vars_ = draft.get("variations")
-    var_preview = ""
-    variations_editable: list[dict[str, Any]] = []
-    if isinstance(vars_, list):
-        for item in vars_:
-            if not isinstance(item, dict):
-                continue
-            vname = str(item.get("name") or "").strip()
-            raw_vals = item.get("values")
-            if not isinstance(raw_vals, list):
-                raw_vals = []
-            vvals = [str(x).strip() for x in raw_vals if str(x).strip()]
-            variations_editable.append({"name": vname, "values": vvals})
-        if vars_:
-            try:
-                var_preview = json.dumps(vars_, ensure_ascii=False, indent=2)
-            except Exception:
-                var_preview = str(vars_)[:2000]
+        return empty
+    assets = draft.get("workspace_assets")
+    if not isinstance(assets, dict):
+        assets = {}
+    amazon_images = assets.get("amazon_images")
+    if not isinstance(amazon_images, list):
+        amazon_images = [
+            x
+            for x in (draft.get("images") or [])
+            if isinstance(x, str)
+            and str(x).strip()
+            and not _is_mockup_media_url(str(x).strip())
+        ]
+    amazon_images = [
+        str(x).strip()
+        for x in amazon_images
+        if isinstance(x, str) and str(x).strip() and not _is_mockup_media_url(str(x).strip())
+    ]
+    mockup_raw = assets.get("mockup_images")
+    mockup_images = [str(x).strip() for x in mockup_raw] if isinstance(mockup_raw, list) else []
+    mockup_images = [x for x in mockup_images if _is_mockup_media_url(x)]
+    active = str(assets.get("active_source") or "amazon").strip().lower()
+    if active not in {"amazon", "mockups"}:
+        active = "amazon"
+    if active == "mockups" and not mockup_images and amazon_images:
+        active = "amazon"
+    current_images = mockup_images if active == "mockups" else amazon_images
     src = draft.get("source") or {}
-    meta_in = draft.get("workspace_meta")
-    meta: dict[str, Any] = dict(defaults_meta)
-    if isinstance(meta_in, dict):
-        meta.update({k: v for k, v in meta_in.items() if k in defaults_meta})
+    if not isinstance(src, dict):
+        src = {}
+    n = len(current_images)
+    var_raw = draft.get("variations")
+    variations_out: list[dict[str, Any]] = []
+    if isinstance(var_raw, list):
+        for row in var_raw:
+            if isinstance(row, dict) and isinstance(row.get("name"), str) and isinstance(row.get("values"), list):
+                vals = [str(v).strip() for v in row["values"] if str(v).strip()]
+                if vals:
+                    variations_out.append({"name": row["name"].strip(), "values": vals})
+    kws = draft.get("keywords")
+    keywords = [str(x).strip() for x in kws] if isinstance(kws, list) else []
+    keywords = [x for x in keywords if x]
+    tags_raw = draft.get("tags")
+    tags = [str(x).strip() for x in tags_raw] if isinstance(tags_raw, list) else []
+    tags = [x for x in tags if x]
     return {
-        "has_draft": bool(draft.get("title") or draft.get("images")),
-        "title": draft.get("title") or "",
-        "description": draft.get("description_text") or "",
-        "images": draft.get("images") if isinstance(draft.get("images"), list) else [],
-        "tags_str": tags_str,
+        "has_draft": bool(amazon_images or mockup_images),
+        "images": current_images,
+        "amazon_images": amazon_images,
+        "mockup_images": mockup_images,
+        "active_source": active,
         "source_url": str(src.get("url") or ""),
         "item_id": str(src.get("item_id") or ""),
-        "price_display": pd,
-        "variations_preview": var_preview[:4000],
-        "variations": variations_editable,
-        "who_made": str(meta.get("who_made") or defaults_meta["who_made"]),
-        "what_is_it": str(meta.get("what_is_it") or defaults_meta["what_is_it"]),
-        "when_made": str(meta.get("when_made") or defaults_meta["when_made"]),
-        "renewal": str(meta.get("renewal") or defaults_meta["renewal"]),
-        "listing_type": str(meta.get("listing_type") or defaults_meta["listing_type"]),
-        "personalization": str(meta.get("personalization") or defaults_meta["personalization"]),
-        "section": str(meta.get("section") or ""),
-        "sku": str(meta.get("sku") or ""),
-        "quantity": str(meta.get("quantity") or "1"),
-        "variation_preset": str(meta.get("variation_preset") or "custom"),
-        "category_taxonomy": str(meta.get("category_taxonomy") or "tshirts"),
-        "shipping_profile_id": str(meta.get("shipping_profile_id") or "").strip(),
+        "image_count": n,
+        "variations": variations_out,
+        "title": str(draft.get("title") or "").strip(),
+        "keywords": keywords[:20],
+        "tags": tags[:_ETSY_TAG_MAX_COUNT],
     }
 
 
-def _build_draft(url: str, no_playwright: bool) -> dict[str, Any]:
+def _draft_image_count(d: dict[str, Any]) -> int:
+    imgs = d.get("images")
+    if not isinstance(imgs, list):
+        return 0
+    return len([x for x in imgs if isinstance(x, str) and str(x).strip()])
+
+
+def _build_draft(url: str, no_playwright: bool) -> tuple[dict[str, Any], str]:
     _validate_amazon_url(url)
+    clean_url = canonical_amazon_dp_url(url)
+    last_html = ""
+    scrape_note = ""
+
+    def _fast_http_draft() -> dict[str, Any]:
+        nonlocal last_html
+        last_html = fetch_html_simple(clean_url)
+        listing_fast = parse_rendered_html(last_html, clean_url)
+        d = to_draft_dict(listing_fast)
+        d["source"] = dict(d.get("source") or {})
+        d["source"]["url"] = clean_url
+        return d
+
     if no_playwright:
-        html = fetch_html_simple(url)
-        listing = parse_rendered_html(html, url)
+        draft = _fast_http_draft()
     else:
-        listing = scrape_with_playwright(url, headless=True)
-    return to_draft_dict(listing)
+        # Önce urllib çoğu zaman "Continue shopping" bot sayfası döndürür; doğrudan Playwright.
+        try:
+            listing = scrape_with_playwright(
+                clean_url,
+                headless=True,
+                wait_ms=4500,
+                variant_wait_ms=1800,
+                goto_timeout_ms=45000,
+            )
+            draft = to_draft_dict(listing)
+            draft["source"] = dict(draft.get("source") or {})
+            draft["source"]["url"] = clean_url
+        except Exception as exc:
+            scrape_note = f"Playwright çalışmadı — HTTP sonucuna düşüldü: {exc}"
+            draft = _fast_http_draft()
+        else:
+            if _draft_image_count(draft) < 1:
+                scrape_note = (
+                    "Tarayıcı oturumunda görsel çıkmadı (Amazon doğrulama veya bot sayfası olabilir). "
+                    "HTTP ile tekrar denendi."
+                )
+                draft_http = _fast_http_draft()
+                if _draft_image_count(draft_http) > 0:
+                    draft = draft_http
+                    scrape_note += f" HTTP: {_draft_image_count(draft)} görsel."
+                else:
+                    scrape_note += (
+                        " HTTP de boş. Terminalde: playwright install chromium — "
+                        "veya kısa linki normal tarayıcıda açıp ürün sayfası geldiğini doğrulayın: "
+                        f"{clean_url}"
+                    )
+    imgs = draft.get("images") if isinstance(draft.get("images"), list) else []
+    draft["workspace_assets"] = {
+        "amazon_images": [str(x).strip() for x in imgs if isinstance(x, str) and str(x).strip()],
+        "active_source": "amazon",
+    }
+    if scrape_note:
+        dbg = draft.get("debug")
+        if not isinstance(dbg, dict):
+            dbg = {}
+        dbg["scrape_note"] = scrape_note
+        draft["debug"] = dbg
+    out = _normalize_images_only_draft(draft)
+    return out, scrape_note
+
+
+def _workspace_draft_json_for_page(draft: dict[str, Any]) -> str:
+    """
+    Sayfaya gömülecek taslak: devasa debug alanını çıkarır (parse/performans),
+    tek satır JSON (</script> kaçış riski azalır).
+    """
+    wa = draft.get("workspace_assets")
+    if not isinstance(wa, dict):
+        wa = {}
+    ai = wa.get("amazon_images")
+    ai_list = ai if isinstance(ai, list) else []
+    ai_f = [
+        str(x).strip()
+        for x in ai_list
+        if isinstance(x, str) and str(x).strip() and not _is_mockup_media_url(str(x).strip())
+    ]
+    mi = wa.get("mockup_images")
+    mi_list = mi if isinstance(mi, list) else []
+    mi_f = [
+        str(x).strip()
+        for x in mi_list
+        if isinstance(x, str) and _is_mockup_media_url(str(x).strip())
+    ]
+    active = str(wa.get("active_source") or "amazon").strip().lower()
+    if active not in {"amazon", "mockups"}:
+        active = "amazon"
+    current = mi_f if active == "mockups" else ai_f
+    slim: dict[str, Any] = {
+        "source": draft.get("source") if isinstance(draft.get("source"), dict) else {},
+        "title": str(draft.get("title") or "").strip(),
+        "images": current,
+        "workspace_assets": {
+            "amazon_images": ai_f,
+            "mockup_images": mi_f,
+            "active_source": active,
+        },
+        "variations": draft.get("variations") if isinstance(draft.get("variations"), list) else [],
+        "keywords": draft.get("keywords") if isinstance(draft.get("keywords"), list) else [],
+        "tags": draft.get("tags") if isinstance(draft.get("tags"), list) else [],
+    }
+    return json.dumps(slim, ensure_ascii=False, separators=(",", ":"))
+
+
+def _json_for_html_script_embed(json_text: str) -> str:
+    """<script type=application/json> içinde </script> veya <…> HTML ayrıştırıcıyı kırmasın."""
+    return json_text.replace("<", "\\u003c").replace(">", "\\u003e")
 
 
 def _render_index(
@@ -763,172 +928,137 @@ def _render_index(
     *,
     error: Optional[str] = None,
     status: Optional[str] = None,
+    warning: Optional[str] = None,
     workspace_url: str = "",
     workspace_draft: Optional[dict[str, Any]] = None,
     workspace_draft_json: str = "",
-    workspace_price: str = "19.99",
     workspace_listing_id: str = "",
     etsy_shop_name: str = "",
-    active_tab: str = "workspace",
 ) -> HTMLResponse:
     if not etsy_shop_name:
         etsy_shop_name = _etsy_shop_display_name()
     if workspace_draft is not None:
-        workspace_draft_json = json.dumps(workspace_draft, ensure_ascii=False, indent=2)
+        workspace_draft_json = _json_for_html_script_embed(
+            _workspace_draft_json_for_page(workspace_draft)
+        )
     elif not workspace_draft_json.strip():
         workspace_draft_json = "{}"
+    else:
+        workspace_draft_json = _json_for_html_script_embed(workspace_draft_json)
     ws = _workspace_ui(workspace_draft)
-    variation_presets = _load_variation_presets()
-    variation_presets_json = json.dumps(variation_presets, ensure_ascii=False)
-    etsy_shipping_profiles, etsy_shipping_profiles_error = _etsy_shipping_profiles_display()
-    ws_ship_sel = str(ws.get("shipping_profile_id") or "").strip()
-    if ws_ship_sel.isdigit():
-        sid_i = int(ws_ship_sel)
-        if not any(p["id"] == sid_i for p in etsy_shipping_profiles):
-            etsy_shipping_profiles = list(etsy_shipping_profiles) + [
-                {"id": sid_i, "title": f"Taslak / .env ({sid_i})"}
-            ]
-            etsy_shipping_profiles.sort(key=lambda x: (str(x["title"]).lower(), x["id"]))
     return templates.TemplateResponse(
         request,
         "index.html",
         {
             "request": request,
+            "active_nav": "workspace",
             "error": error,
             "status": status,
+            "warning": warning,
             "workspace_url": workspace_url,
             "workspace_draft": workspace_draft,
             "workspace_draft_json": workspace_draft_json,
-            "workspace_price": workspace_price,
+            "etsy_placeholder_price": _etsy_placeholder_price(),
             "workspace_listing_id": workspace_listing_id,
             "etsy_shop_name": etsy_shop_name,
             "ws": ws,
-            "app_draft_listings": _load_app_draft_listings(),
-            "variation_presets": variation_presets,
-            "variation_presets_json": variation_presets_json,
-            "etsy_shipping_profiles": etsy_shipping_profiles,
-            "etsy_shipping_profiles_error": etsy_shipping_profiles_error,
-            "active_tab": active_tab,
+            "mockup_categories": _list_mockup_catalog(),
         },
     )
 
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request) -> HTMLResponse:
+    sid = str(request.query_params.get("state") or "").strip()
+    if sid:
+        states = _load_workspace_states()
+        rec = states.get(sid)
+        if isinstance(rec, dict):
+            wd_raw = rec.get("workspace_draft")
+            wd_out: Optional[dict[str, Any]] = None
+            if isinstance(wd_raw, dict):
+                wd_out = _normalize_images_only_draft(copy.deepcopy(wd_raw))
+            wli = rec.get("workspace_listing_id")
+            wli_s = str(wli).strip() if wli is not None and str(wli).strip() else ""
+            return _render_index(
+                request,
+                error=rec.get("error") if isinstance(rec.get("error"), str) else None,
+                status=rec.get("status") if isinstance(rec.get("status"), str) else None,
+                warning=rec.get("warning") if isinstance(rec.get("warning"), str) else None,
+                workspace_url=rec.get("workspace_url") if isinstance(rec.get("workspace_url"), str) else "",
+                workspace_draft=wd_out,
+                workspace_listing_id=wli_s,
+            )
+        return _render_index(
+            request,
+            warning=(
+                "Bu oturum bağlantısı geçersiz veya süresi doldu (sayfayı yeniden yükleyip "
+                "Amazon URL’sini tekrar gönderin)."
+            ),
+        )
     return _render_index(request)
 
 
-@app.get("/presets", response_class=HTMLResponse)
-def presets(request: Request) -> HTMLResponse:
-    return _render_index(request, active_tab="presets")
-
-
-@app.get("/drafts", response_class=HTMLResponse)
-def drafts(request: Request) -> HTMLResponse:
-    return _render_index(request, active_tab="drafts")
-
-
-@app.post("/drafts/open", response_class=HTMLResponse)
-def drafts_open(request: Request, listing_id: int = Form(...)) -> HTMLResponse:
-    rows = _load_app_draft_listings(limit=500)
-    selected = None
-    for row in rows:
-        if int(row.get("listing_id") or -1) == int(listing_id):
-            selected = row
-            break
-    if not selected:
-        return _render_index(request, active_tab="drafts", error=f"Draft bulunamadı: {listing_id}")
-
-    draft_obj = selected.get("draft_json")
-    if not isinstance(draft_obj, dict):
-        draft_obj = {
-            "title": str(selected.get("title") or ""),
-            "images": [selected.get("image")] if selected.get("image") else [],
-            "source": {
-                "url": str(selected.get("source_url") or ""),
-                "item_id": str(selected.get("source_item_id") or ""),
-            },
-            "tags": [],
-            "variations": [],
-            "workspace_meta": {
-                "who_made": "i_did",
-                "what_is_it": "a_finished_product",
-                "when_made": "made_to_order",
-                "renewal": "manual",
-                "listing_type": "physical",
-                "personalization": "off",
-                "section": "",
-                "sku": "",
-                "quantity": "1",
-                "variation_preset": "custom",
-                "category_taxonomy": "tshirts",
-                "shipping_profile_id": "",
-            },
-        }
-
-    return _render_index(
-        request,
-        active_tab="workspace",
-        status=f"Draft yüklendi: {listing_id}. Düzenleyip update edebilirsin.",
-        workspace_draft=draft_obj,
-        workspace_price=str(selected.get("price") or "19.99"),
-        workspace_listing_id=str(listing_id),
-    )
-
-
-@app.post("/drafts/delete", response_class=HTMLResponse)
-def drafts_delete(request: Request, listing_id: int = Form(...)) -> HTMLResponse:
-    try:
-        delete_listing(int(listing_id))
-    except Exception as exc:
-        return _render_index(
-            request,
-            active_tab="drafts",
-            error=f"Etsy listing silinemedi ({listing_id}): {exc}",
-        )
-    removed = _delete_app_draft_listing(listing_id)
-    if removed:
-        return _render_index(
-            request,
-            active_tab="drafts",
-            status=f"Draft Etsy ve uygulamadan silindi: {listing_id}",
-        )
-    return _render_index(
-        request,
-        active_tab="drafts",
-        status=f"Etsy listing silindi, yerel kayıt zaten yoktu: {listing_id}",
-    )
-
-
-@app.post("/presets/save", response_class=HTMLResponse)
-async def presets_save(request: Request) -> HTMLResponse:
-    form_in = await request.form()
-
-    def _gl(name: str) -> list[str]:
-        return [str(v).strip() for v in form_in.getlist(name)]
-
-    payload: dict[str, Any] = {
-        "shirt_type1_name": str(form_in.get("shirt_type1_name") or "Size"),
-        "shirt_type2_name": str(form_in.get("shirt_type2_name") or "Color"),
-        "shirt_type2_opts": _gl("shirt_type2_opts"),
-        "shirt_type1_opts": _gl("shirt_type1_opts"),
-        "shirt_type1_opt_prices": _gl("shirt_type1_opt_prices"),
-        "sweat_type1_name": str(form_in.get("sweat_type1_name") or "Size"),
-        "sweat_type2_name": str(form_in.get("sweat_type2_name") or "Color"),
-        "sweat_type2_opts": _gl("sweat_type2_opts"),
-        "sweat_type1_opts": _gl("sweat_type1_opts"),
-        "sweat_type1_opt_prices": _gl("sweat_type1_opt_prices"),
-        "cc_type1_name": str(form_in.get("cc_type1_name") or "Size"),
-        "cc_type2_name": str(form_in.get("cc_type2_name") or "Color"),
-        "cc_type2_opts": _gl("cc_type2_opts"),
-        "cc_type1_opts": _gl("cc_type1_opts"),
-        "cc_type1_opt_prices": _gl("cc_type1_opt_prices"),
+@app.get("/media/mockups/{path:path}")
+def mockup_media(path: str) -> FileResponse:
+    p = _safe_mockup_file_path(path)
+    if not p:
+        raise HTTPException(status_code=404, detail="Mockup bulunamadı")
+    media = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
     }
+    ct = media.get(p.suffix.lower(), "application/octet-stream")
+    return FileResponse(p, media_type=ct, filename=p.name)
+
+
+@app.get("/media/workspace-mockups/{path:path}")
+def workspace_mockup_media(path: str) -> FileResponse:
+    p = _safe_workspace_mockup_file_path(path)
+    if not p:
+        raise HTTPException(status_code=404, detail="Workspace mockup bulunamadı")
+    media = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+    }
+    ct = media.get(p.suffix.lower(), "application/octet-stream")
+    return FileResponse(p, media_type=ct, filename=p.name)
+
+
+@app.get("/media/amazon-image")
+def amazon_image_proxy(u: str = Query("", max_length=4500)) -> Response:
+    """Amazon ürün görselini sunucu üzerinden ilet (tarayıcıda doğrudan CDN sık engellenir)."""
+    raw = unquote(u).strip()
+    if not raw or not is_amazon_cdn_product_image_url(raw):
+        raise HTTPException(status_code=400, detail="Geçersiz görsel URL")
+    req = urllib.request.Request(
+        raw,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            ),
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        },
+        method="GET",
+    )
     try:
-        _save_variation_presets_from_form(payload)
-        return _render_index(request, active_tab="presets", status="Presetler kaydedildi.")
-    except Exception as exc:
-        return _render_index(request, active_tab="presets", error=str(exc))
+        with urllib.request.urlopen(req, timeout=60.0) as resp:
+            data = resp.read()
+            if len(data) > 30 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="Görsel çok büyük")
+            ct = resp.headers.get("content-type") or "image/jpeg"
+            if not ct.startswith("image/"):
+                ct = "image/jpeg"
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=502, detail="Görsel indirilemedi")
+    return Response(content=data, media_type=ct, headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.post("/workspace/scrape", response_class=HTMLResponse)
@@ -938,42 +1068,61 @@ def workspace_scrape(
     no_playwright: bool = Form(False),
 ) -> HTMLResponse:
     try:
-        draft = _build_draft(url, no_playwright)
+        clean_url = canonical_amazon_dp_url(url)
+        pre_match = _find_existing_draft_match(clean_url) or _find_existing_draft_match(url)
+        draft, scrape_note = _build_draft(url, no_playwright)
         if isinstance(draft, dict):
-            try:
-                from main import _augment_images_with_color_variants
-
-                _augment_images_with_color_variants(draft)
-            except Exception:
-                pass
-        if isinstance(draft, dict) and "tags" not in draft:
-            draft["tags"] = []
-        if isinstance(draft, dict) and "workspace_meta" not in draft:
-            draft["workspace_meta"] = {
-                "who_made": "i_did",
-                "what_is_it": "a_finished_product",
-                "when_made": "made_to_order",
-                "renewal": "manual",
-                "listing_type": "physical",
-                "personalization": "off",
-                "section": "",
-                "sku": "",
-                "quantity": "1",
-                "variation_preset": "custom",
-                "category_taxonomy": "tshirts",
-                "shipping_profile_id": "",
+            _normalize_images_only_draft(draft)
+        asin = ""
+        if isinstance(draft, dict):
+            src = draft.get("source")
+            if isinstance(src, dict):
+                asin = str(src.get("item_id") or "")
+        match = _find_existing_draft_match(clean_url, asin) or _find_existing_draft_match(url, asin) or pre_match
+        warn = None
+        if match:
+            mid = str(match.get("listing_id") or match.get("etsy_listing_id") or "").strip()
+            asin_s = str(match.get("source_item_id") or "").strip()
+            warn = (
+                f"Bu link/ASIN için daha önce Etsy draft oluşturulmuş görünüyor"
+                f"{' (listing: ' + mid + ')' if mid else ''}"
+                f"{' | ASIN: ' + asin_s if asin_s else ''}. "
+                "Yeni draft açmadan önce mevcut listing’i güncellemek isteyebilirsin."
+            )
+        img_n = 0
+        if isinstance(draft, dict):
+            imgs = draft.get("images")
+            if isinstance(imgs, list):
+                img_n = len([x for x in imgs if isinstance(x, str) and x.strip()])
+        if scrape_note:
+            warn = f"{scrape_note} {warn}" if warn else scrape_note
+        if img_n == 0:
+            extra = (
+                "Hiç görsel alınamadı. Uzun takip linkleri yerine kısa adres kullanıldı: "
+                f"{clean_url} — 'HTTP only' kutusunu kapatıp tekrar deneyin (Chromium/Playwright gerekir). "
+                "Sunucu Amazon’a bot gibi görünüyorsa tarayıcı modu şarttır."
+            )
+            warn = f"{extra} {warn}" if warn else extra
+            status = "Yükleme tamamlandı ancak görsel bulunamadı (yukarıdaki uyarıya bakın)."
+        else:
+            status = (
+                f"{img_n} görsel hazır (her renk/varyant ASIN için en fazla 4 fotoğraf). "
+                "Etsy’ye yalnız fotoğraflı taslak için aşağıdaki düğmeyi kullanın."
+            )
+        return _redirect_workspace_state(
+            {
+                "status": status,
+                "warning": warn,
+                "workspace_url": clean_url,
+                "workspace_draft": draft,
             }
-        return _render_index(
-            request,
-            status="Taslak hazır — Etsy listing formuna benzer alanları düzenleyip yayınlayabilirsin.",
-            workspace_url=url,
-            workspace_draft=draft,
         )
     except Exception as exc:
-        return _render_index(
-            request,
-            error=str(exc),
-            workspace_url=url,
+        return _redirect_workspace_state(
+            {
+                "error": str(exc),
+                "workspace_url": url,
+            }
         )
 
 
@@ -981,76 +1130,215 @@ def workspace_scrape(
 def workspace_publish(
     request: Request,
     draft_json: str = Form(...),
-    price: str = Form("19.99"),
     etsy_update_listing_id: str = Form(""),
 ) -> HTMLResponse:
     try:
         draft = json.loads(draft_json)
-        desc = str(draft.get("description_text") or "")
-        if draft.get("source", {}).get("url"):
-            desc += f"\n\nKaynak: {draft['source']['url']}"
+        if not isinstance(draft, dict):
+            raise RuntimeError("Geçersiz taslak verisi.")
+        draft = _normalize_images_only_draft(draft)
+        src = draft.get("source") if isinstance(draft.get("source"), dict) else {}
+        source_url = str(src.get("url") or "")
+        draft_title = str(draft.get("title") or "").strip()
+        title = draft_title[:140] if draft_title else _etsy_placeholder_title()
+        desc = _etsy_placeholder_description(source_url)
+        price = _etsy_placeholder_price()
+
+        raw_imgs = draft.get("images") or []
+        images = [x for x in raw_imgs if isinstance(x, str) and x.strip()][:20]
+        if not images:
+            raise RuntimeError("Etsy’ye göndermek için en az bir görsel URL’si gerekir.")
+        raw_tags = draft.get("tags")
+        tags = [str(x).strip() for x in raw_tags] if isinstance(raw_tags, list) else []
+        tags = [x for x in tags if x][:13]
 
         listing_id: int
         if etsy_update_listing_id.strip():
             listing_id = int(etsy_update_listing_id.strip())
             update_existing_listing(
                 listing_id=listing_id,
-                title=str(draft.get("title") or "")[:140],
-                description=desc[:49990],
-                price=price,
-                quantity=1,
+                title=title,
+                tags=tags if tags else None,
             )
-            status = f"Etsy listing güncellendi: {listing_id}"
+            status = f"Mevcut Etsy taslağına görseller yüklendi: {listing_id}"
+            if draft_title:
+                status += " | title güncellendi"
+            if tags:
+                status += f" | {len(tags)} tag güncellendi"
             _save_app_draft_listing(listing_id=listing_id, draft=draft, price=price, mode="update")
         else:
-            wm_pub = draft.get("workspace_meta")
-            if not isinstance(wm_pub, dict):
-                wm_pub = {}
-            ship_pub = str(wm_pub.get("shipping_profile_id") or "").strip()
-            if not ship_pub.isdigit():
-                raise RuntimeError(
-                    "Yeni Etsy taslağı için Shipping & processing altında bir shipping profile seçin."
-                )
-            listing_opts, mp_note = _draft_listing_create_args(draft)
+            listing_opts, mp_note = _minimal_create_listing_kwargs()
             result = create_draft_listing(
-                title=str(draft.get("title") or "")[:140],
-                description=desc[:49990],
+                title=title,
+                description=desc,
                 price=price,
                 quantity=1,
+                tags=tags if tags else None,
                 **listing_opts,
             )
             listing_id = int(result.get("listing_id"))
-            status = f"Etsy draft oluşturuldu: {listing_id}"
+            status = f"Etsy draft oluşturuldu (yalnızca yer tutucu metin + görseller): {listing_id}"
             if mp_note:
                 status += " | " + mp_note
+            if tags:
+                status += f" | {len(tags)} tag eklendi"
             _save_app_draft_listing(listing_id=listing_id, draft=draft, price=price, mode="create")
 
-        raw_imgs = draft.get("images") or []
-        images = [x for x in raw_imgs if isinstance(x, str) and x.strip()][:20]
-        if images:
-            status += " | " + _upload_images_best_effort(listing_id, images)
+        status += " | " + _upload_images_best_effort(listing_id, images)
 
-        variation_status = _apply_variations(listing_id, draft, price)
-        if variation_status:
-            status += f" | {variation_status}"
-
-        return _render_index(
-            request,
-            status=status,
-            workspace_draft=draft if isinstance(draft, dict) else None,
-            workspace_price=price,
-            workspace_listing_id=etsy_update_listing_id,
+        return _redirect_workspace_state(
+            {
+                "status": status,
+                "workspace_draft": draft if isinstance(draft, dict) else None,
+                "workspace_listing_id": etsy_update_listing_id,
+            }
         )
     except Exception as exc:
         try:
             draft_err = json.loads(draft_json)
         except Exception:
             draft_err = None
-        return _render_index(
-            request,
-            error=str(exc),
-            workspace_draft=draft_err if isinstance(draft_err, dict) else None,
-            workspace_draft_json=draft_json,
-            workspace_price=price,
-            workspace_listing_id=etsy_update_listing_id,
+        return _redirect_workspace_state(
+            {
+                "error": str(exc),
+                "workspace_draft": draft_err if isinstance(draft_err, dict) else None,
+                "workspace_listing_id": etsy_update_listing_id,
+            }
         )
+
+
+@app.post("/workspace/generate-mockups", response_class=HTMLResponse)
+async def workspace_generate_mockups(
+    request: Request,
+    design_white_file: UploadFile = File(...),
+    design_black_file: UploadFile = File(...),
+    draft_json: str = Form("{}"),
+    workspace_url: str = Form(""),
+    selected_template_urls: str = Form("[]"),
+) -> HTMLResponse:
+    draft: dict[str, Any] = {}
+    try:
+        parsed = json.loads(draft_json or "{}")
+        if isinstance(parsed, dict):
+            draft = _normalize_images_only_draft(parsed)
+    except Exception:
+        draft = {}
+    try:
+        root = _mockups_root()
+        if not root.is_dir():
+            raise RuntimeError(f"Mockups klasörü bulunamadı: {root}")
+
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        batch_id = f"web_{stamp}_{uuid4().hex[:8]}"
+        # Etsy/Mockup mantığı:
+        # - Açık (light) template'lere siyah design basılır -> dark_design_path
+        # - Koyu (dark) template'lere beyaz design basılır -> light_design_path
+        white_design_path = await _save_uploaded_design_file(
+            design_white_file, batch_id=batch_id, role="white"
+        )
+        black_design_path = await _save_uploaded_design_file(
+            design_black_file, batch_id=batch_id, role="black"
+        )
+
+        out_root = (WORKSPACE_MOCKUPS_ROOT / batch_id).resolve()
+        cfg = MockupProcessingConfig(
+            mockups_root=root,
+            dark_design_path=black_design_path,
+            light_design_path=white_design_path,
+            output_root=out_root,
+        )
+        selected_raw: list[str] = []
+        try:
+            p = json.loads(selected_template_urls or "[]")
+            if isinstance(p, list):
+                selected_raw = [str(x).strip() for x in p if isinstance(x, str) and str(x).strip()]
+        except Exception:
+            selected_raw = []
+        selected_paths = _template_paths_from_urls(selected_raw, root)
+        if selected_raw and not selected_paths:
+            raise RuntimeError("Secilen template'ler gecersiz veya bulunamadi.")
+        if selected_paths:
+            out_paths, failed = _process_selected_mockups(cfg, selected_paths)
+        else:
+            out_paths, failed = process_all(cfg)
+        if not out_paths:
+            raise RuntimeError("Mockup üretilemedi. Mockups klasörünü ve design dosyasını kontrol edin.")
+        urls: list[str] = []
+        for p in out_paths:
+            try:
+                rel = p.resolve().relative_to(WORKSPACE_MOCKUPS_ROOT.resolve()).as_posix()
+            except ValueError:
+                continue
+            urls.append(_workspace_mockup_rel_url(rel))
+        if not urls:
+            raise RuntimeError("Mockup görselleri URL'e dönüştürülemedi.")
+
+        d_assets = draft.get("workspace_assets")
+        assets = d_assets if isinstance(d_assets, dict) else {}
+        assets["mockup_images"] = urls
+        assets["active_source"] = "mockups"
+        draft["workspace_assets"] = assets
+        draft["images"] = urls
+        draft = _normalize_images_only_draft(draft)
+        msg = f"{len(urls)} mockup üretildi."
+        if failed:
+            msg += f" {failed} dosya üretilemedi."
+        return _redirect_workspace_state(
+            {
+                "status": msg,
+                "workspace_draft": draft,
+                "workspace_url": workspace_url,
+            }
+        )
+    except Exception as exc:
+        return _redirect_workspace_state(
+            {
+                "warning": str(exc),
+                "workspace_draft": draft if isinstance(draft, dict) else None,
+                "workspace_url": workspace_url,
+            }
+        )
+
+
+@app.post("/workspace/generate-tags", response_class=HTMLResponse)
+def workspace_generate_tags(
+    request: Request,
+    draft_json: str = Form(...),
+) -> HTMLResponse:
+    try:
+        draft = json.loads(draft_json)
+        if not isinstance(draft, dict):
+            raise RuntimeError("Geçersiz taslak verisi.")
+        draft = _normalize_images_only_draft(draft)
+        kws = draft.get("keywords")
+        keywords = [str(x).strip() for x in kws] if isinstance(kws, list) else []
+        keywords = [x for x in keywords if x]
+        title = str(draft.get("title") or "").strip()
+        tags, mode = _generate_etsy_tags(keywords, title)
+        if not tags:
+            raise RuntimeError("Tag üretilemedi. Önce scrape ile keyword alın.")
+        draft["tags"] = tags
+        return _redirect_workspace_state(
+            {
+                "status": f"{len(tags)} Etsy tag üretildi ({mode}).",
+                "workspace_draft": draft,
+            }
+        )
+    except Exception as exc:
+        try:
+            draft_err = json.loads(draft_json)
+        except Exception:
+            draft_err = None
+        return _redirect_workspace_state(
+            {
+                "error": str(exc),
+                "workspace_draft": draft_err if isinstance(draft_err, dict) else None,
+            }
+        )
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    _port = int(os.environ.get("PORT", "8000"))
+    uvicorn.run("webapp:app", host="127.0.0.1", port=_port, reload=False)

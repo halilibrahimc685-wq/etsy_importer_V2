@@ -1,1196 +1,234 @@
-<!doctype html>
-<html lang="tr">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Etsy Lab — Listing Workspace</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-    <style>
-      :root {
-        --bg-page: #f0f2f5;
-        --bg-card: #ffffff;
-        --sidebar: #1a2332;
-        --sidebar-hover: #243044;
-        --text: #1c1e21;
-        --text-muted: #65676b;
-        --border: #e4e6eb;
-        --accent: #4f6bed;
-        --accent-hover: #3d5bd4;
-        --accent-soft: rgba(79, 107, 237, 0.12);
-        --danger-bg: #fde8e8;
-        --danger-text: #b42318;
-        --success-bg: #e6f4ea;
-        --success-text: #137333;
-        --radius: 12px;
-        --shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 4px 12px rgba(0, 0, 0, 0.04);
-        --font: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
-      }
+{% extends "base.html" %}
+{% block title %}Etsy Lab — Görseller → Draft{% endblock %}
+{% block topbar %}
+<header class="topbar">
+  <div>
+    <h1>Görseller → Etsy draft</h1>
+    <div class="topbar-meta">{{ etsy_shop_name }} · Başlık/açıklama Etsy’de düzenlenecek (yer tutucu gönderilir).</div>
+  </div>
+</header>
+{% endblock %}
+{% block content %}
+          {% if error %}<div class="alert alert-error"><strong>Hata.</strong> {{ error }}</div>{% endif %}
+          {% if status %}<div class="alert alert-success"><strong>Tamam.</strong> {{ status }}</div>{% endif %}
+          {% if warning %}<div class="alert alert-warning"><strong>Uyarı.</strong> {{ warning }}</div>{% endif %}
 
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        font-family: var(--font);
-        color: var(--text);
-        background: var(--bg-page);
-        min-height: 100vh;
-      }
-
-      .app {
-        display: flex;
-        min-height: 100vh;
-      }
-
-      .sidebar {
-        width: 240px;
-        flex-shrink: 0;
-        background: var(--sidebar);
-        color: #e8eaed;
-        padding: 20px 0;
-        display: flex;
-        flex-direction: column;
-      }
-
-      .sidebar-brand {
-        padding: 0 20px 24px;
-        font-weight: 700;
-        font-size: 1.05rem;
-        letter-spacing: -0.02em;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-        margin-bottom: 8px;
-        display: block;
-        text-decoration: none;
-        color: #e8eaed;
-        transition: opacity 0.15s;
-      }
-
-      .sidebar-brand:hover {
-        opacity: 0.9;
-      }
-
-      .sidebar-brand span { color: var(--accent); opacity: 0.95; }
-
-      .nav-item {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 12px 20px;
-        color: #b8bcc8;
-        text-decoration: none;
-        font-size: 0.9rem;
-        font-weight: 500;
-        transition: background 0.15s, color 0.15s;
-      }
-
-      .nav-item:hover { background: var(--sidebar-hover); color: #fff; }
-      .nav-item.active {
-        background: rgba(79, 107, 237, 0.2);
-        color: #fff;
-        border-left: 3px solid var(--accent);
-        padding-left: 17px;
-      }
-
-      .nav-icon { font-size: 1.1rem; opacity: 0.9; }
-
-      .main {
-        flex: 1;
-        display: flex;
-        flex-direction: column;
-        min-width: 0;
-      }
-
-      .topbar {
-        background: var(--bg-card);
-        border-bottom: 1px solid var(--border);
-        padding: 16px 28px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 16px;
-        flex-wrap: wrap;
-      }
-
-      .topbar h1 {
-        margin: 0;
-        font-size: 1.35rem;
-        font-weight: 700;
-        letter-spacing: -0.03em;
-      }
-
-      .topbar-meta {
-        font-size: 0.8rem;
-        color: var(--text-muted);
-        margin-top: 4px;
-      }
-
-      .pill-row {
-        display: inline-flex;
-        background: var(--bg-page);
-        border-radius: 999px;
-        padding: 4px;
-        border: 1px solid var(--border);
-      }
-
-      .pill-row a {
-        padding: 8px 18px;
-        border-radius: 999px;
-        text-decoration: none;
-        font-size: 0.8rem;
-        font-weight: 600;
-        letter-spacing: 0.04em;
-        color: var(--text-muted);
-        transition: background 0.15s, color 0.15s;
-      }
-
-      .pill-row a:hover { color: var(--text); }
-      .pill-row a.active {
-        background: var(--sidebar);
-        color: #fff;
-        box-shadow: var(--shadow);
-      }
-
-      .content {
-        padding: 24px 28px 40px;
-        max-width: 920px;
-      }
-
-      .alert {
-        padding: 14px 18px;
-        border-radius: var(--radius);
-        margin-bottom: 20px;
-        font-size: 0.9rem;
-        line-height: 1.45;
-      }
-
-      .alert-error {
-        background: var(--danger-bg);
-        color: var(--danger-text);
-        border: 1px solid #f5c4c6;
-      }
-
-      .alert-success {
-        background: var(--success-bg);
-        color: var(--success-text);
-        border: 1px solid #b7e0c4;
-      }
-
-      .card {
-        background: var(--bg-card);
-        border-radius: var(--radius);
-        border: 1px solid var(--border);
-        box-shadow: var(--shadow);
-        padding: 22px 24px;
-        margin-bottom: 20px;
-      }
-
-      .card h2 {
-        margin: 0 0 6px;
-        font-size: 1.05rem;
-        font-weight: 700;
-        letter-spacing: -0.02em;
-      }
-
-      .card-desc {
-        margin: 0 0 20px;
-        font-size: 0.9rem;
-        color: var(--text-muted);
-        line-height: 1.5;
-      }
-
-      .field { margin-bottom: 18px; }
-      .field label {
-        display: block;
-        font-size: 0.8rem;
-        font-weight: 600;
-        color: var(--text);
-        margin-bottom: 8px;
-      }
-
-      .field input[type="text"],
-      .field textarea {
-        width: 100%;
-        padding: 11px 14px;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        font-family: inherit;
-        font-size: 0.9rem;
-        transition: border-color 0.15s, box-shadow 0.15s;
-      }
-
-      .field textarea {
-        min-height: 280px;
-        font-family: ui-monospace, "SF Mono", Menlo, monospace;
-        font-size: 0.82rem;
-        line-height: 1.45;
-      }
-
-      .field input:focus,
-      .field textarea:focus {
-        outline: none;
-        border-color: var(--accent);
-        box-shadow: 0 0 0 3px var(--accent-soft);
-      }
-
-      .check-row {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        font-size: 0.88rem;
-        color: var(--text);
-        cursor: pointer;
-      }
-
-      .check-row input { width: 16px; height: 16px; accent-color: var(--accent); }
-
-      .btn {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        gap: 8px;
-        padding: 11px 20px;
-        border: none;
-        border-radius: 8px;
-        font-family: inherit;
-        font-size: 0.9rem;
-        font-weight: 600;
-        cursor: pointer;
-        transition: background 0.15s, opacity 0.1s;
-      }
-
-      .btn-primary {
-        background: var(--accent);
-        color: #fff;
-      }
-
-      .btn-primary:hover { background: var(--accent-hover); }
-      .btn-primary:active { opacity: 0.92; }
-
-      .btn-secondary {
-        background: var(--bg-page);
-        color: var(--text);
-        border: 1px solid var(--border);
-      }
-
-      .btn-secondary:hover { background: #e8eaed; }
-
-      .actions { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 10px; }
-
-      .split-cards {
-        display: grid;
-        gap: 20px;
-      }
-
-      @media (min-width: 900px) {
-        .split-cards.workspace-grid {
-          grid-template-columns: 1fr 1fr;
-          align-items: start;
-        }
-      }
-
-      @media (max-width: 768px) {
-        .app { flex-direction: column; }
-        .sidebar {
-          width: 100%;
-          flex-direction: row;
-          flex-wrap: wrap;
-          padding: 12px;
-        }
-        .sidebar-brand { width: 100%; border-bottom: none; margin-bottom: 0; padding-bottom: 12px; }
-        .nav-item { width: auto; flex: 1; justify-content: center; text-align: center; }
-      }
-
-      /* Etsy-like workspace */
-      .ws-page { max-width: 900px; }
-      .ws-toolbar {
-        display: flex;
-        align-items: center;
-        gap: 14px;
-        flex-wrap: wrap;
-        margin-bottom: 18px;
-      }
-      .link-back {
-        color: var(--text-muted);
-        text-decoration: none;
-        font-size: 0.9rem;
-        font-weight: 600;
-      }
-      .link-back:hover { color: var(--accent); }
-      .ws-search-box {
-        flex: 1;
-        min-width: 200px;
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        border-radius: 999px;
-        padding: 8px 14px;
-        box-shadow: var(--shadow);
-      }
-      .ws-search-box span { opacity: 0.5; font-size: 1rem; }
-      .ws-search-box input {
-        border: none;
-        flex: 1;
-        font-family: inherit;
-        font-size: 0.88rem;
-        outline: none;
-        background: transparent;
-      }
-      .listing-strip {
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        padding: 16px 18px;
-        margin-bottom: 20px;
-        display: flex;
-        gap: 16px;
-        align-items: flex-start;
-        box-shadow: var(--shadow);
-      }
-      .listing-strip .thumb {
-        width: 72px;
-        height: 72px;
-        object-fit: contain;
-        border-radius: 8px;
-        border: 1px solid var(--border);
-        background: #f3f4f6;
-      }
-      .listing-strip .meta small { color: var(--text-muted); font-size: 0.75rem; }
-      .listing-strip .meta h3 {
-        margin: 4px 0 6px;
-        font-size: 0.95rem;
-        font-weight: 600;
-        line-height: 1.35;
-      }
-      .listing-strip .meta .price-line { font-size: 0.88rem; color: var(--text); }
-      .listing-strip .meta .shop { font-size: 0.82rem; color: var(--text-muted); margin-top: 4px; }
-
-      .ws-section {
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        margin-bottom: 16px;
-        overflow: hidden;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.04);
-      }
-      .ws-section-head {
-        font-size: 0.72rem;
-        font-weight: 700;
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
-        color: var(--text-muted);
-        padding: 10px 18px;
-        background: #fafbfc;
-        border-bottom: 1px solid var(--border);
-      }
-      .ws-section-body { padding: 16px 18px; }
-      .ws-row {
-        display: grid;
-        grid-template-columns: 160px 1fr;
-        gap: 16px 20px;
-        align-items: start;
-        margin-bottom: 14px;
-      }
-      .ws-row:last-child { margin-bottom: 0; }
-      .ws-label {
-        font-size: 0.88rem;
-        font-weight: 600;
-        color: var(--text);
-        padding-top: 8px;
-      }
-      @media (max-width: 640px) {
-        .ws-row { grid-template-columns: 1fr; }
-        .ws-label { padding-top: 0; }
-      }
-      .char-count {
-        text-align: right;
-        font-size: 0.75rem;
-        color: var(--text-muted);
-        margin-top: 6px;
-      }
-      .photo-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
-        gap: 10px;
-        margin-bottom: 12px;
-      }
-      .photo-grid img {
-        width: 100%;
-        aspect-ratio: 1;
-        object-fit: cover;
-        border-radius: 6px;
-        border: 1px solid var(--border);
-      }
-      .ws-photo-editor {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-        align-items: flex-start;
-        margin-bottom: 14px;
-        touch-action: manipulation;
-      }
-      .ws-photo-tile {
-        position: relative;
-        width: 104px;
-        height: 104px;
-        flex-shrink: 0;
-        border-radius: 8px;
-        overflow: hidden;
-        border: 1px solid var(--border);
-        background: #f3f4f6;
-        cursor: grab;
-        touch-action: manipulation;
-        -webkit-touch-callout: none;
-      }
-      .ws-photo-tile:active { cursor: grabbing; }
-      .ws-photo-tile--dragging {
-        opacity: 0.5;
-        outline: 2px dashed var(--accent);
-        outline-offset: 2px;
-      }
-      .ws-photo-tile img {
-        width: 100%;
-        height: 100%;
-        object-fit: contain;
-        display: block;
-        pointer-events: none;
-        user-select: none;
-        -webkit-user-drag: none;
-      }
-      .ws-photo-handle {
-        position: absolute;
-        left: 4px;
-        bottom: 4px;
-        padding: 2px 6px;
-        border-radius: 4px;
-        background: rgba(255, 255, 255, 0.92);
-        border: 1px solid var(--border);
-        font-size: 0.65rem;
-        font-weight: 700;
-        letter-spacing: 0.02em;
-        color: var(--text-muted);
-        pointer-events: none;
-        z-index: 1;
-        line-height: 1.2;
-      }
-      .ws-photo-remove {
-        position: absolute;
-        top: 4px;
-        right: 4px;
-        width: 28px;
-        height: 28px;
-        padding: 0;
-        border: none;
-        border-radius: 50%;
-        background: rgba(0, 0, 0, 0.62);
-        color: #fff;
-        font-size: 18px;
-        line-height: 1;
-        cursor: pointer;
-        z-index: 2;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-      .ws-photo-remove:hover {
-        background: #b91c1c;
-      }
-      .ws-photo-add-row {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        align-items: center;
-        margin-bottom: 8px;
-      }
-      .ws-photo-add-row input[type="url"] {
-        flex: 1;
-        min-width: 200px;
-        padding: 10px 12px;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        font-size: 0.88rem;
-      }
-      .ws-var-etsy-card {
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        padding: 16px 18px;
-        margin-bottom: 14px;
-        background: #fff;
-        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
-      }
-      .ws-var-etsy-head {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 14px;
-        padding-bottom: 10px;
-        border-bottom: 1px solid var(--border);
-        gap: 10px;
-        flex-wrap: wrap;
-      }
-      .ws-var-etsy-label {
-        font-weight: 700;
-        font-size: 0.92rem;
-        color: var(--text);
-      }
-      .ws-var-field-label {
-        display: block;
-        font-size: 0.72rem;
-        font-weight: 700;
-        color: var(--text-muted);
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        margin-bottom: 6px;
-      }
-      .ws-var-name-row {
-        display: flex;
-        gap: 10px;
-        flex-wrap: wrap;
-        align-items: center;
-        margin-bottom: 14px;
-      }
-      .ws-var-suggest {
-        padding: 9px 10px;
-        border-radius: 8px;
-        border: 1px solid var(--border);
-        font-size: 0.88rem;
-        background: #fafbfc;
-        max-width: 220px;
-      }
-      .ws-var-name {
-        flex: 1;
-        min-width: 160px;
-        padding: 9px 11px;
-        border-radius: 8px;
-        border: 1px solid var(--border);
-        font-size: 0.9rem;
-      }
-      .ws-var-chips {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        min-height: 44px;
-        padding: 10px;
-        background: #f4f5f7;
-        border-radius: 8px;
-        border: 1px dashed #ccd0d5;
-        margin-bottom: 8px;
-        align-items: center;
-      }
-      .ws-var-chips:empty::after {
-        content: "Henüz seçenek yok — aşağıya yazıp Enter ile ekleyin";
-        font-size: 0.8rem;
-        color: var(--text-muted);
-      }
-      .ws-var-chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 2px;
-        padding: 5px 6px 5px 11px;
-        background: #fff;
-        border: 1px solid var(--border);
-        border-radius: 999px;
-        font-size: 0.82rem;
-        max-width: 100%;
-      }
-      .ws-var-chip-text {
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        max-width: 200px;
-      }
-      .ws-var-chip-x {
-        border: none;
-        background: none;
-        cursor: pointer;
-        padding: 0 4px;
-        font-size: 1.15rem;
-        line-height: 1;
-        color: var(--text-muted);
-        border-radius: 4px;
-      }
-      .ws-var-chip-x:hover { color: var(--danger-text); background: var(--danger-bg); }
-      .ws-var-chip-input {
-        width: 100%;
-        padding: 9px 11px;
-        border-radius: 8px;
-        border: 1px solid var(--border);
-        font-size: 0.88rem;
-      }
-      .ws-photo-count {
-        font-size: 0.82rem;
-        color: var(--text-muted);
-        margin-bottom: 8px;
-      }
-      .ws-tags-panel {
-        background: #ede7f6;
-        border-radius: 8px;
-        padding: 14px;
-        border: 1px solid #d1c4e9;
-      }
-      .ws-tags-panel .preset-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 10px;
-      }
-      .ws-tags-panel .preset-row button {
-        background: none;
-        border: none;
-        color: var(--accent);
-        font-weight: 600;
-        font-size: 0.85rem;
-        cursor: not-allowed;
-        opacity: 0.55;
-      }
-      .hint { font-size: 0.78rem; color: var(--text-muted); margin-top: 6px; }
-      .ws-radios {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-      }
-      .ws-radios label {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        padding: 8px 12px;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        font-size: 0.86rem;
-        cursor: pointer;
-        background: #fafbfc;
-      }
-      .ws-radios input:checked + span { font-weight: 600; }
-      .ws-footer-bar {
-        display: flex;
-        justify-content: flex-end;
-        gap: 10px;
-        flex-wrap: wrap;
-        margin-top: 20px;
-        padding-top: 16px;
-        border-top: 1px solid var(--border);
-      }
-      .ws-empty {
-        text-align: center;
-        padding: 40px 20px;
-        color: var(--text-muted);
-        font-size: 0.95rem;
-      }
-      .tab-page { max-width: 1100px; }
-      .drafts-table-wrap { overflow-x: auto; margin-top: 8px; }
-      .drafts-table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 0.88rem;
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        overflow: hidden;
-      }
-      .drafts-table th, .drafts-table td {
-        padding: 10px 12px;
-        border-bottom: 1px solid var(--border);
-        text-align: left;
-        vertical-align: middle;
-      }
-      .drafts-table th { background: #f8f9fb; font-weight: 600; font-size: 0.8rem; color: var(--text-muted); }
-      .draft-thumb {
-        width: 56px;
-        height: 56px;
-        object-fit: contain;
-        border-radius: 6px;
-        border: 1px solid var(--border);
-        background: #f3f4f6;
-      }
-      .draft-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-      .preset-block {
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        padding: 16px 18px;
-        margin-bottom: 16px;
-        box-shadow: var(--shadow);
-      }
-      .preset-block h3 { margin: 0 0 12px; font-size: 1rem; }
-      .preset-block label { display: block; font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; color: var(--text-muted); }
-      .preset-block textarea {
-        width: 100%;
-        min-height: 140px;
-        font-family: ui-monospace, monospace;
-        font-size: 0.8rem;
-        padding: 8px 10px;
-        border-radius: 8px;
-        border: 1px solid var(--border);
-      }
-      .preset-block input[type="text"] {
-        width: 100%;
-        max-width: 280px;
-        padding: 8px 10px;
-        border-radius: 8px;
-        border: 1px solid var(--border);
-      }
-      .preset-block .preset-size-cols input[type="text"],
-      .preset-block .preset-body-cols input[type="text"],
-      .preset-block .preset-body-cols input[type="number"] {
-        max-width: none;
-        width: 100%;
-        box-sizing: border-box;
-      }
-      .preset-block .preset-price-wrap input[type="number"] {
-        width: auto;
-      }
-      .preset-size-cols,
-      .preset-body-cols {
-        --preset-color: minmax(140px, 1fr);
-        --preset-price: minmax(96px, 120px);
-        display: grid;
-        grid-template-columns: 1fr var(--preset-price) var(--preset-color);
-        gap: 8px 12px;
-        align-items: start;
-        margin-bottom: 12px;
-        max-width: 920px;
-      }
-      .pbc-col {
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-        min-width: 0;
-      }
-      .preset-field-line {
-        display: flex;
-        align-items: center;
-        min-height: 38px;
-      }
-      .preset-field-line .preset-price-wrap {
-        flex: 1;
-        min-width: 0;
-        display: flex;
-        align-items: center;
-        gap: 2px;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        background: var(--bg-page);
-        padding-left: 10px;
-        box-sizing: border-box;
-      }
-      .preset-currency {
-        flex-shrink: 0;
-        font-size: 0.85rem;
-        font-weight: 600;
-        color: var(--text-muted);
-      }
-      .preset-price-wrap .preset-size-price {
-        flex: 1;
-        min-width: 0;
-        border: none !important;
-        background: transparent;
-        padding: 8px 10px 8px 4px;
-        border-radius: 0 8px 8px 0;
-        font-size: 0.85rem;
-        box-sizing: border-box;
-        -moz-appearance: textfield;
-      }
-      .preset-price-wrap .preset-size-price::-webkit-outer-spin-button,
-      .preset-price-wrap .preset-size-price::-webkit-inner-spin-button {
-        -webkit-appearance: none;
-        margin: 0;
-      }
-      @media (max-width: 720px) {
-        .preset-size-cols,
-        .preset-body-cols {
-          grid-template-columns: 1fr;
-        }
-        .pbc-col .preset-size-price { max-width: none; }
-      }
-      .preset-size-head {
-        font-size: 0.8rem;
-        font-weight: 600;
-        color: var(--text-muted);
-      }
-      .preset-size-cols .preset-size-opt,
-      .preset-body-cols .preset-size-opt {
-        padding: 8px 10px;
-        border-radius: 8px;
-        border: 1px solid var(--border);
-        font-size: 0.85rem;
-        min-width: 0;
-        width: 100%;
-        box-sizing: border-box;
-      }
-      .preset-add-row { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
-    </style>
-  </head>
-  <body>
-    <div class="app">
-      <aside class="sidebar">
-        <a href="/" class="sidebar-brand">Etsy <span>Lab</span></a>
-        <a href="/" class="nav-item {% if active_tab == 'workspace' %}active{% endif %}">
-          <span class="nav-icon">✏️</span> Listing workspace
-        </a>
-        <a href="/drafts" class="nav-item {% if active_tab == 'drafts' %}active{% endif %}">
-          <span class="nav-icon">📋</span> Drafts
-        </a>
-        <a href="/presets" class="nav-item {% if active_tab == 'presets' %}active{% endif %}">
-          <span class="nav-icon">⚙️</span> Presets
-        </a>
-        <p style="padding: 8px 20px 0; margin: 0; font-size: 0.8rem; color: #8b909a; line-height: 1.45;">
-          Amazon URL’sinden veri çekin, düzenleyip Etsy draft oluşturun veya güncelleyin.
-        </p>
-      </aside>
-
-      <div class="main">
-        <header class="topbar">
-          <div>
-            {% if active_tab == 'workspace' %}
-            <h1>Listing workspace</h1>
-            <div class="topbar-meta">
-              Görselleri sürükleyerek sıralayın; varyasyonları Etsy’deki gibi düzenleyin.
-            </div>
-            {% elif active_tab == 'drafts' %}
-            <h1>Drafts</h1>
-            <div class="topbar-meta">Yerel kayıtlı listing’ler — Etsy’de silmek için Sil kullanın.</div>
-            {% elif active_tab == 'presets' %}
-            <h1>Varyasyon preset’leri</h1>
-            <div class="topbar-meta">Shirt / sweatshirt / Comfort Colors beden ve renk listelerini düzenleyin.</div>
-            {% endif %}
-          </div>
-        </header>
-
-        <div class="content">
-          {% if error %}
-          <div class="alert alert-error"><strong>Hata.</strong> {{ error }}</div>
-          {% endif %}
-          {% if status %}
-          <div class="alert alert-success"><strong>Tamam.</strong> {{ status }}</div>
-          {% endif %}
-
-          {% if active_tab == 'workspace' %}
           <div class="ws-page">
             <div class="ws-toolbar">
-              <a class="link-back" href="/">← Ana</a>
-              <form id="ws-scrape-form" class="ws-search-box" method="post" action="/workspace/scrape" style="flex:1; margin:0;">
+              <form id="ws-scrape-form" class="ws-search-box" method="post" action="/workspace/scrape" style="flex:1;margin:0;">
                 <span aria-hidden="true">🔍</span>
-                <input type="url" name="url" value="{{ workspace_url }}" placeholder="Amazon ürün URL’sini yapıştırın…" required />
+                <input type="url" name="url" value="{{ workspace_url }}" placeholder="Amazon ürün URL…" required />
                 <button type="submit" class="btn btn-secondary" style="padding:6px 12px;font-size:0.8rem;">Yükle</button>
               </form>
-              <label class="check-row" style="margin:0;font-size:0.82rem;">
+              <label class="check-row" style="margin:0;">
                 <input type="checkbox" name="no_playwright" form="ws-scrape-form" />
-                <span>HTTP only (Playwright yok — genelde daha hızlı, bazı sayfalarda veri eksik)</span>
+                <span>HTTP only (çoğu zaman boş — önerilmez)</span>
               </label>
             </div>
-            <p class="hint" style="margin:0 0 14px;font-size:0.8rem;color:var(--text-muted);max-width:900px;">
-              Her listing yüklemesinde renk varyantları için ek Amazon istekleri (paralel) çalışır. Ek süre: tarayıcı (Playwright) + bu istekler;
-              ardından Etsy shipping profil listesi (yaklaşık 2&nbsp;dk önbellek).
+            <p class="hint" style="margin-bottom:16px;">
+              Yükleme sonrası mümkün olduğunca çok renk/varyant ASIN galerisi birleştirilir. Etsy’ye görsel yüklerken sunucu adresi için
+              <code>APP_PUBLIC_URL</code> (örn. <code>http://127.0.0.1:8000</code>) kullanılır.
             </p>
 
             {% if not ws.has_draft %}
-            <div class="card ws-empty">
-              <p><strong>Kaynak URL</strong> ile ürün verisini çekin. Aşağıda Etsy’ye çok benzeyen bir <strong>listing draft</strong> formu açılacak.</p>
-              <p style="margin-top:12px;font-size:0.88rem;">İpucu: Üstteki arama kutusuna Amazon linkini yapıştırıp <strong>Yükle</strong> deyin.</p>
+            <div class="card">
+              <p><strong>Amazon ürün URL’sini</strong> yapıştırıp <strong>Yükle</strong>’ye basın (Playwright açık olsun; “HTTP only” genelde yetersiz).</p>
             </div>
             {% else %}
-
             <div class="listing-strip">
-              <img id="ws-listing-thumb" class="thumb" src="{{ ws.images[0] if ws.images else '' }}" alt="" onerror="this.style.opacity=0.3" />
+              <img id="ws-listing-thumb" class="thumb" src="{% if ws.images %}{{ ws.images[0]|amazon_display }}{% endif %}" alt="" onerror="this.style.opacity=0.3" />
               <div class="meta">
-                <small>Listing found</small>
-                <h3>{{ ws.title }}</h3>
-                <div class="price-line">{% if ws.price_display %}{{ ws.price_display }}{% else %}—{% endif %}</div>
-                <div class="shop">{{ etsy_shop_name }}</div>
-                {% if ws.source_url %}
-                <p style="margin:10px 0 0;font-size:0.82rem;line-height:1.4;">
-                  <a href="{{ ws.source_url|e }}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-weight:600;">Kaynak ürün</a>
-                  {% if ws.item_id %}<span style="color:var(--text-muted);"> · {{ ws.item_id|e }}</span>{% endif %}
+                <small>Görsel seti</small>
+                <h3>{{ ws.image_count }} görsel{% if ws.item_id %} · {{ ws.item_id|e }}{% endif %}</h3>
+                {% if ws.title %}
+                <div class="hint" style="margin-top:6px;"><strong>Title:</strong> {{ ws.title|e }}</div>
+                {% endif %}
+                <p class="hint" style="margin-top:8px;">
+                  {% if ws.source_url %}
+                  <a href="{{ ws.source_url|e }}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-weight:600;">Amazon kaynağı</a>
+                  {% else %}Kaynak URL yok.{% endif %}
                 </p>
+                {% if ws.keywords %}
+                <div class="hint" style="margin-top:10px;line-height:1.5;">
+                  <strong>Keywords:</strong> {{ ws.keywords|join(', ')|e }}
+                </div>
+                {% endif %}
+                {% if ws.tags %}
+                <div class="hint" style="margin-top:8px;line-height:1.5;">
+                  <strong>Etsy tags:</strong> {{ ws.tags|join(', ')|e }}
+                </div>
+                {% endif %}
+                {% if ws.variations %}
+                <div class="hint" style="margin-top:10px;line-height:1.5;">
+                  {% for v in ws.variations %}
+                  <div><strong>{{ v['name']|e }}:</strong> {{ v['values']|join(', ')|e }}</div>
+                  {% endfor %}
+                </div>
                 {% endif %}
               </div>
             </div>
 
             <form id="form-publish" method="post" action="/workspace/publish" onsubmit="return wsBuildDraft(event)">
               <input type="hidden" name="draft_json" id="field_draft_json" value="" />
+              <input type="hidden" name="draft_json" id="field_tag_json" value="" form="form-generate-tags" />
+              <input type="hidden" name="draft_json" id="field_mockup_json" value="" form="form-generate-mockups" />
+              <input type="hidden" name="workspace_url" value="{{ workspace_url|e }}" form="form-generate-mockups" />
+              <input type="hidden" name="selected_template_urls" id="field_selected_template_urls" value="[]" form="form-generate-mockups" />
 
               <div class="ws-section">
-                <div class="ws-section-head">Photo / Video</div>
+                <div class="ws-section-head">Görseller</div>
                 <div class="ws-section-body">
-                  <p class="ws-photo-count" id="ws-photo-count"></p>
-                  <div id="ws-photo-editor" class="ws-photo-editor" aria-label="Görseller">
-                    {% for img in ws.images %}
-                    <div class="ws-photo-tile" data-url="{{ img|e }}" draggable="true">
-                      <span class="ws-photo-handle" aria-hidden="true">↕</span>
-                      <button type="button" class="ws-photo-remove" aria-label="Görseli kaldır">×</button>
-                      <img src="{{ img|e }}" alt="" loading="lazy" onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2280%22 height=%2280%22%3E%3Crect fill=%22%23e5e7eb%22 width=%2280%22 height=%2280%22/%3E%3C/svg%3E'" />
-                    </div>
-                    {% endfor %}
+                  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+                    <button type="button" id="ws-tab-amazon" class="btn btn-secondary" style="padding:8px 12px;font-size:0.8rem;">Amazon</button>
+                    <button type="button" id="ws-tab-mockups" class="btn btn-secondary" style="padding:8px 12px;font-size:0.8rem;">My mockups</button>
                   </div>
-                  <div class="ws-photo-add-row">
-                    <input type="url" id="ws_photo_add_url" placeholder="Görsel URL’si yapıştır…" autocomplete="off" />
-                    <button type="button" class="btn btn-secondary" id="ws_photo_add_btn">Görsel ekle</button>
-                  </div>
-                  <p class="hint">Kareleri <strong>sürükleyip bırakarak</strong> sıralayın (Etsy’deki gibi). × ile silin. İlk görsel kapak olur. Etsy yüklemesinde sıradaki ilk 20 kullanılır.</p>
-                </div>
-              </div>
-
-              <div class="ws-section">
-                <div class="ws-section-head">Title</div>
-                <div class="ws-section-body">
-                  <div class="ws-row" style="grid-template-columns:1fr;">
-                      <input type="text" id="ws_title" maxlength="140" value="{{ ws.title }}" style="width:100%;padding:11px 14px;border:1px solid var(--border);border-radius:8px;font-size:0.95rem;" />
-                      <div class="char-count"><span id="title-count">0</span> / 140</div>
-                    </div>
-                </div>
-              </div>
-
-              <div class="ws-section">
-                <div class="ws-section-head">Description</div>
-                <div class="ws-section-body">
-                  <textarea id="ws_description" rows="14" style="width:100%;">{{ ws.description }}</textarea>
-                </div>
-              </div>
-
-              <div class="ws-section">
-                <div class="ws-section-head">Tag</div>
-                <div class="ws-section-body">
-                  <div class="ws-tags-panel">
-                    <div class="preset-row">
-                      <span style="font-weight:700;font-size:0.85rem;">TAG</span>
-                      <button type="button" disabled>Load from preset ▾</button>
-                    </div>
-                    <input type="text" id="ws_tags" value="{{ ws.tags_str }}" placeholder="Virgülle ayırın, örn: dad gift, comfort colors, fathers day" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid #d1c4e9;" />
-                    <p class="hint">Etsy’de tag API’si ayrı adımda eklenebilir; şimdilik taslak JSON’da saklanır.</p>
-                  </div>
-                </div>
-              </div>
-
-              <div class="ws-section">
-                <div class="ws-section-head">Inventory &amp; variation</div>
-                <div class="ws-section-body">
-                  <div class="ws-row">
-                    <div class="ws-label">Variation preset</div>
-                    <div>
-                      <select id="ws_variation_preset" style="width:100%;max-width:320px;padding:10px;border-radius:8px;border:1px solid var(--border);">
-                        <option value="custom" {% if ws.variation_preset == 'custom' %}selected{% endif %}>Amazon</option>
-                        <option value="shirt" {% if ws.variation_preset == 'shirt' %}selected{% endif %}>Shirt preset</option>
-                        <option value="sweatshirt" {% if ws.variation_preset == 'sweatshirt' %}selected{% endif %}>Sweatshirt &amp; hoodie</option>
-                        <option value="comfort_colors" {% if ws.variation_preset == 'comfort_colors' %}selected{% endif %}>Comfort Colors</option>
-                      </select>
-                      <p class="hint" style="margin-top:8px;">Preset değişince aşağıdaki varyasyon satırları Presets sekmesindeki listeyle doldurulur. Amazon seçiminde sayfadan gelen (veya sıfırlama ile seed) varyasyon satırları kullanılır.</p>
+                  <p class="hint" id="ws-photo-count" style="margin-bottom:10px;"></p>
+                  <p class="hint" style="margin-bottom:10px;">Amazon sekmesinde CDN görselleri proxy ile önizlenir; My mockups sekmesinde yerel mockup dosyaları kullanılır.</p>
+                  <div id="ws-panel-amazon">
+                    <div id="ws-photo-editor-amazon" class="ws-photo-editor" aria-label="Amazon görselleri"></div>
+                    <div class="ws-photo-add-row">
+                      <input type="url" id="ws_photo_add_url" placeholder="Amazon görsel URL…" autocomplete="off" />
+                      <button type="button" class="btn btn-secondary" id="ws_photo_add_btn">Ekle</button>
                     </div>
                   </div>
-                  <div class="ws-row">
-                    <div class="ws-label">Kategori (Etsy)</div>
-                    <div>
-                      <select id="ws_category_taxonomy" style="width:100%;max-width:360px;padding:10px;border-radius:8px;border:1px solid var(--border);">
-                        <option value="tshirts" {% if ws.category_taxonomy == 'tshirts' %}selected{% endif %}>T-shirts</option>
-                        <option value="sweatshirts" {% if ws.category_taxonomy == 'sweatshirts' %}selected{% endif %}>Sweatshirts</option>
-                      </select>
-                      <p class="hint" style="margin-top:8px;">Yeni draft oluştururken Etsy taxonomy ID’si buna göre atanır.</p>
-                    </div>
-                  </div>
-                  <div class="ws-row">
-                    <div class="ws-label">Etsy price</div>
-                    <div>
-                      <input type="text" name="price" id="ws_price" value="{{ workspace_price }}" style="max-width:200px;padding:10px;border-radius:8px;border:1px solid var(--border);" />
-                      <p class="hint" style="margin-top:8px;">Listing temel fiyatı (renkler için). Presets’te bir bedenin yanındaki <strong>fiyat kutusu</strong> boşsa o beden de bu tutarı kullanır (Shirt / Sweatshirt / Comfort Colors seçiliyken).</p>
-                    </div>
-                  </div>
-                  <div class="ws-row">
-                    <div class="ws-label">Quantity</div>
-                    <div><input type="text" id="ws_qty" value="{{ ws.quantity }}" style="max-width:120px;padding:10px;border-radius:8px;border:1px solid var(--border);" /></div>
-                  </div>
-                  <div class="ws-row">
-                    <div class="ws-label">SKU</div>
-                    <div><input type="text" id="ws_sku" value="{{ ws.sku }}" placeholder="Opsiyonel" style="max-width:280px;padding:10px;border-radius:8px;border:1px solid var(--border);" /></div>
-                  </div>
-                  <div class="ws-row" style="align-items:flex-start;">
-                    <div class="ws-label">Varyasyonlar</div>
-                    <div style="flex:1;min-width:0;">
-                      <p class="hint" style="margin:0 0 12px;">Etsy’deki gibi en fazla iki düşey: birincil ve ikincil özellik. Seçenekleri chip olarak ekleyip çıkarın.</p>
-                      <div id="ws-variations-editor">
-                        {% for v in ws.variations %}
-                        <div class="ws-var-dim ws-var-etsy-card">
-                          <div class="ws-var-etsy-head">
-                            <span class="ws-var-etsy-label">{% if loop.first %}Birincil varyasyon{% else %}İkincil varyasyon{% endif %}</span>
-                            <button type="button" class="btn btn-secondary ws-var-remove-dim">Kaldır</button>
-                          </div>
-                          <div>
-                            <span class="ws-var-field-label">Özellik</span>
-                            <div class="ws-var-name-row">
-                              <select class="ws-var-suggest" aria-label="Hazır özellik tipi">
-                                <option value="">Özel ad…</option>
-                                <option value="Color" {% if v.name == 'Color' %}selected{% endif %}>Renk (Color)</option>
-                                <option value="Size" {% if v.name == 'Size' %}selected{% endif %}>Beden (Size)</option>
-                                <option value="Material" {% if v.name == 'Material' %}selected{% endif %}>Malzeme (Material)</option>
-                                <option value="Style" {% if v.name == 'Style' %}selected{% endif %}>Stil (Style)</option>
-                                <option value="Dimensions" {% if v.name == 'Dimensions' %}selected{% endif %}>Ölçü (Dimensions)</option>
-                              </select>
-                              <input type="text" class="ws-var-name" value="{{ v.name|e }}" placeholder="Örn. Color, Size" />
-                            </div>
-                          </div>
-                          <div>
-                            <span class="ws-var-field-label">Seçenekler</span>
-                            <div class="ws-var-chips">
-                              {% for opt in v['values'] %}
-                              <span class="ws-var-chip" data-value="{{ opt|e }}"><span class="ws-var-chip-text">{{ opt|e }}</span><button type="button" class="ws-var-chip-x" aria-label="Kaldır">×</button></span>
-                              {% endfor %}
-                            </div>
-                            <input type="text" class="ws-var-chip-input" placeholder="Seçenek yazın, Enter ile ekleyin" autocomplete="off" />
-                          </div>
+                  <div id="ws-panel-mockups" style="display:none;">
+                    <div id="ws-photo-editor-mockups" class="ws-photo-editor" aria-label="Mockup görselleri"></div>
+                    <div style="margin:8px 0 12px;">
+                      <div class="ws-photo-add-row">
+                        <input type="file" name="design_white_file" id="ws_design_white_file" accept=".png,.jpg,.jpeg,.webp" form="form-generate-mockups" style="display:none;" />
+                        <input type="file" name="design_black_file" id="ws_design_black_file" accept=".png,.jpg,.jpeg,.webp" form="form-generate-mockups" style="display:none;" />
+                        <div id="ws_drop_white" class="mu-tile" style="min-width:220px;max-width:260px;aspect-ratio:auto;padding:12px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:6px;cursor:pointer;background:#fff;">
+                          <strong style="font-size:0.82rem;">White design</strong>
+                          <span class="hint" style="text-align:center;">(koyu template icin) Drag & drop veya tikla</span>
+                          <span id="ws_drop_white_name" class="hint" style="font-size:0.75rem;"></span>
                         </div>
-                        {% endfor %}
+                        <div id="ws_drop_black" class="mu-tile" style="min-width:220px;max-width:260px;aspect-ratio:auto;padding:12px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:6px;cursor:pointer;background:#fff;">
+                          <strong style="font-size:0.82rem;">Black design</strong>
+                          <span class="hint" style="text-align:center;">(acik template icin) Drag & drop veya tikla</span>
+                          <span id="ws_drop_black_name" class="hint" style="font-size:0.75rem;"></span>
+                        </div>
+                        <button type="button" class="btn btn-secondary" onclick="wsGenerateMockups(event)">Mockupları üret</button>
                       </div>
-                      <button type="button" class="btn btn-secondary" id="ws_var_add_dim" style="margin-top:4px;">İkincil varyasyon ekle</button>
                     </div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="ws-section">
-                <div class="ws-section-head">About this listing</div>
-                <div class="ws-section-body">
-                  <div class="ws-row">
-                    <div class="ws-label">Who made it?</div>
-                    <div>
-                      <select id="ws_who" style="width:100%;max-width:360px;padding:10px;border-radius:8px;border:1px solid var(--border);">
-                        <option value="i_did" {% if ws.who_made == 'i_did' %}selected{% endif %}>I did</option>
-                        <option value="someone_else" {% if ws.who_made == 'someone_else' %}selected{% endif %}>Someone else</option>
-                        <option value="collective" {% if ws.who_made == 'collective' %}selected{% endif %}>A member of my shop</option>
-                      </select>
-                    </div>
-                  </div>
-                  <div class="ws-row">
-                    <div class="ws-label">What is it?</div>
-                    <div>
-                      <select id="ws_what" style="width:100%;max-width:360px;padding:10px;border-radius:8px;border:1px solid var(--border);">
-                        <option value="a_finished_product" {% if ws.what_is_it == 'a_finished_product' %}selected{% endif %}>A finished product</option>
-                        <option value="a_supply_or_tool" {% if ws.what_is_it == 'a_supply_or_tool' %}selected{% endif %}>A supply or tool to make things</option>
-                      </select>
-                    </div>
-                  </div>
-                  <div class="ws-row">
-                    <div class="ws-label">When was it made?</div>
-                    <div>
-                      <select id="ws_when" style="width:100%;max-width:360px;padding:10px;border-radius:8px;border:1px solid var(--border);">
-                        <option value="made_to_order" {% if ws.when_made == 'made_to_order' %}selected{% endif %}>Made to order</option>
-                        <option value="2020_2026" {% if ws.when_made == '2020_2026' %}selected{% endif %}>2020–2026</option>
-                      </select>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="ws-section">
-                <div class="ws-section-head">Listing settings</div>
-                <div class="ws-section-body">
-                  <div class="ws-row">
-                    <div class="ws-label">Renewal</div>
-                    <div class="ws-radios">
-                      <label><input type="radio" name="ws_renewal" value="manual" {% if ws.renewal == 'manual' %}checked{% endif %} /> <span>Manual</span></label>
-                      <label><input type="radio" name="ws_renewal" value="auto" {% if ws.renewal == 'auto' %}checked{% endif %} /> <span>Auto</span></label>
-                    </div>
-                  </div>
-                  <div class="ws-row">
-                    <div class="ws-label">Type</div>
-                    <div class="ws-radios">
-                      <label><input type="radio" name="ws_ltype" value="physical" {% if ws.listing_type == 'physical' %}checked{% endif %} /> <span>Physical</span></label>
-                      <label><input type="radio" name="ws_ltype" value="digital" {% if ws.listing_type == 'digital' %}checked{% endif %} /> <span>Digital</span></label>
-                    </div>
-                  </div>
-                  <div class="ws-row">
-                    <div class="ws-label">Personalization</div>
-                    <div class="ws-radios">
-                      <label><input type="radio" name="ws_pers" value="off" {% if ws.personalization == 'off' %}checked{% endif %} /> <span>Off</span></label>
-                      <label><input type="radio" name="ws_pers" value="on" {% if ws.personalization == 'on' %}checked{% endif %} /> <span>On</span></label>
-                    </div>
-                  </div>
-                  <div class="ws-row">
-                    <div class="ws-label">Shop section</div>
-                    <div>
-                      <select id="ws_section" style="width:100%;max-width:360px;padding:10px;border-radius:8px;border:1px solid var(--border);">
-                        <option value="" {% if not ws.section %}selected{% endif %}>None</option>
-                        <option value="shirts" {% if ws.section == 'shirts' %}selected{% endif %}>Shirts</option>
-                        <option value="gifts" {% if ws.section == 'gifts' %}selected{% endif %}>Gifts</option>
-                      </select>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="ws-section">
-                <div class="ws-section-head">Shipping &amp; processing</div>
-                <div class="ws-section-body">
-                  <div class="ws-row">
-                    <div class="ws-label">Shipping profile</div>
-                    <div>
-                      <select id="ws_shipping_profile_id" style="width:100%;max-width:420px;padding:10px;border-radius:8px;border:1px solid var(--border);">
-                        <option value="" {% if not ws.shipping_profile_id %}selected{% endif %}>— Profil seçin —</option>
-                        {% for sp in etsy_shipping_profiles %}
-                        <option value="{{ sp.id }}" {% if ws.shipping_profile_id == (sp.id | string) %}selected{% endif %}>{{ sp.title|e }} — ID {{ sp.id }}</option>
+                    <div class="hint" style="margin:8px 0;">Kütüphane: üretmek istediğin template'leri seç (mavi çerçeve).</div>
+                    <div class="mu-grid" style="padding:0;">
+                      {% for cat in mockup_categories %}
+                        {% for img in cat.images %}
+                        <button type="button" class="mu-tile ws-mockup-pick" data-url="{{ img.url|e }}" title="{{ cat.title|e }} / {{ img.filename|e }}" style="padding:0;border:1px solid var(--border);cursor:pointer;">
+                          <img src="{{ img.url|e }}" alt="{{ img.filename|e }}" loading="lazy" />
+                        </button>
                         {% endfor %}
-                      </select>
-                      {% if etsy_shipping_profiles_error %}
-                      <p class="hint" style="margin-top:10px;color:var(--danger-text);"><strong>Profiller çekilemedi.</strong> {{ etsy_shipping_profiles_error|e }} Yeni taslak yayınlamak için listeden seçim yapılamaz; OAuth / ağı kontrol edin.</p>
-                      {% elif not etsy_shipping_profiles %}
-                      <p class="hint" style="margin-top:10px;">Etsy’den profil listesi boş. Yeni taslak için en az bir shipping profile görünmeli.</p>
-                      {% else %}
-                      <p class="hint" style="margin-top:10px;">Her yeni listing için buradan profil seçin. Güncelleme (mevcut listing ID ile) bu alanı zorunlu tutmaz.</p>
-                      {% endif %}
+                      {% endfor %}
                     </div>
                   </div>
+                  <p class="hint">Sürükleyerek sıra. İlk görsel kapak. Etsy’de en fazla 20 (aktif sekmeden gönderilir).</p>
                 </div>
               </div>
 
               <div class="ws-section">
+                <div class="ws-section-head">Etsy</div>
                 <div class="ws-section-body">
-                  <p class="hint" style="margin:0 0 12px;">Yayınlarken tanımlı varyasyonlar Etsy envanterine uygulanır (readiness state .env’de gerekli).</p>
-                  <div class="ws-row" style="margin-top:0;">
-                    <div class="ws-label">Mevcut listing ID</div>
+                  <div class="ws-row">
+                    <div class="ws-label">Tags (editable)</div>
                     <div>
-                      <input type="text" name="etsy_update_listing_id" value="{{ workspace_listing_id }}" placeholder="Boş = yeni Etsy draft" style="max-width:280px;padding:10px;border-radius:8px;border:1px solid var(--border);" />
+                      <textarea id="ws_tags_editor" rows="3" placeholder="tag1, tag2, tag3" style="max-width:100%;padding:10px;border-radius:8px;border:1px solid var(--border);width:100%;font-family:inherit;font-size:0.9rem;"></textarea>
+                      <p class="hint" id="ws-tags-count" style="margin-top:8px;">0/13 tag</p>
+                    </div>
+                  </div>
+                  <div class="ws-row" style="margin-bottom:0;">
+                    <div class="ws-label">Listing ID</div>
+                    <div>
+                      <input type="text" name="etsy_update_listing_id" value="{{ workspace_listing_id }}" placeholder="Boş = yeni draft (yer tutucu metin + görseller)" style="max-width:320px;padding:10px;border-radius:8px;border:1px solid var(--border);width:100%;" />
+                      <p class="hint" style="margin-top:8px;">
+                        Yeni draft: Etsy API zorunlu alanları <code>.env</code> ile (
+                        <code>ETSY_DRAFT_PLACEHOLDER_TITLE</code>,
+                        <code>ETSY_DRAFT_PLACEHOLDER_DESCRIPTION</code>,
+                        fiyat <code>ETSY_DRAFT_PLACEHOLDER_PRICE</code> = {{ etsy_placeholder_price|e }},
+                        <code>ETSY_TAXONOMY_ID</code>, <code>ETSY_SHIPPING_PROFILE_ID</code>).
+                      </p>
                     </div>
                   </div>
                 </div>
               </div>
 
               <div class="ws-footer-bar">
-                <button type="button" class="btn btn-secondary" onclick="wsReset()">Reset</button>
-                <button type="submit" class="btn btn-primary">Publish to Etsy (draft)</button>
+                <button type="button" class="btn btn-secondary" onclick="wsReset()">Sıfırla</button>
+                <button type="button" class="btn btn-secondary" onclick="wsGenerateTags(event)">Tag üret</button>
+                <button type="submit" class="btn btn-primary">Etsy’ye gönder (görseller)</button>
               </div>
             </form>
+            <form id="form-generate-tags" method="post" action="/workspace/generate-tags"></form>
+            <form id="form-generate-mockups" method="post" action="/workspace/generate-mockups" enctype="multipart/form-data"></form>
 
             <script type="application/json" id="draft-seed">{{ workspace_draft_json | safe }}</script>
-            <script type="application/json" id="variation-presets-data">{{ variation_presets_json | safe }}</script>
             <script>
               (function () {
                 const seedEl = document.getElementById('draft-seed');
                 const PLACEHOLDER_IMG = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2280%22 height=%2280%22%3E%3Crect fill=%22%23e5e7eb%22 width=%2280%22 height=%2280%22/%3E%3C/svg%3E';
-
-                function wsGetPhotoUrls() {
-                  const tiles = document.querySelectorAll('#ws-photo-editor .ws-photo-tile');
+                const SOURCE_AMAZON = 'amazon';
+                const SOURCE_MOCKUPS = 'mockups';
+                let activeSource = '{{ ws.active_source|default("amazon") }}';
+                if (activeSource !== SOURCE_MOCKUPS) activeSource = SOURCE_AMAZON;
+                function wsIsAmazonUrl(u) {
+                  if (typeof u !== 'string') return false;
+                  const s = u.trim();
+                  if (!s) return false;
+                  return s.indexOf('/media/mockups/') !== 0 && s.indexOf('/media/workspace-mockups/') !== 0;
+                }
+                function wsIsMockupUrl(u) {
+                  if (typeof u !== 'string') return false;
+                  const s = u.trim();
+                  return s.indexOf('/media/mockups/') === 0 || s.indexOf('/media/workspace-mockups/') === 0;
+                }
+                function wsDisplaySrc(raw) {
+                  var u = (raw || '').trim();
+                  if (!u) return '';
+                  if (u.startsWith('https://') && u.indexOf('amazon.com/images/I/') !== -1) {
+                    return '/media/amazon-image?u=' + encodeURIComponent(u);
+                  }
+                  return u;
+                }
+                function wsReadSeed() {
+                  try {
+                    return JSON.parse((seedEl.textContent || '').trim() || '{}');
+                  } catch (e) {
+                    console.warn('draft-seed JSON okunamadı', e);
+                    return {};
+                  }
+                }
+                function wsUrlsFromPhotoEditorDom(editorId, predicate) {
                   const out = [];
-                  tiles.forEach(function (t) {
+                  const box = document.getElementById(editorId);
+                  if (!box) return out;
+                  box.querySelectorAll('.ws-photo-tile').forEach(function (t) {
                     const u = t.getAttribute('data-url');
-                    if (u && u.trim()) out.push(u.trim());
+                    if (u && u.trim() && predicate(u.trim())) out.push(u.trim());
                   });
                   return out;
                 }
-
+                function wsGetPhotoUrls(source) {
+                  const src = source || activeSource;
+                  const out = [];
+                  const editorId = src === SOURCE_MOCKUPS ? '#ws-photo-editor-mockups' : '#ws-photo-editor-amazon';
+                  document.querySelectorAll(editorId + ' .ws-photo-tile').forEach(function (t) {
+                    const u = t.getAttribute('data-url');
+                    if (!u || !u.trim()) return;
+                    const v = u.trim();
+                    if (src === SOURCE_MOCKUPS ? wsIsMockupUrl(v) : wsIsAmazonUrl(v)) out.push(v);
+                  });
+                  return out;
+                }
                 function wsRefreshListingThumb() {
                   const thumb = document.getElementById('ws-listing-thumb');
-                  const urls = wsGetPhotoUrls();
-                  if (thumb) thumb.src = urls[0] || '';
+                  const urls = wsGetPhotoUrls(activeSource);
+                  if (thumb) thumb.src = wsDisplaySrc(urls[0] || '');
                 }
-
                 function wsUpdatePhotoCount() {
                   const el = document.getElementById('ws-photo-count');
-                  const n = document.querySelectorAll('#ws-photo-editor .ws-photo-tile').length;
-                  if (el) {
-                    el.textContent = n
-                      ? n + ' görsel — sürükleyerek sıralayın, × ile silin'
-                      : 'Görsel yok — aşağıdan URL ekleyebilirsiniz';
-                  }
+                  const n = wsGetPhotoUrls(activeSource).length;
+                  const label = activeSource === SOURCE_MOCKUPS ? 'My mockups' : 'Amazon';
+                  if (el) el.textContent = n ? (label + ': ' + n + ' görsel') : (label + ': Görsel yok');
                 }
-
                 function wsMakePhotoTile(url) {
                   const tile = document.createElement('div');
                   tile.className = 'ws-photo-tile';
@@ -1203,40 +241,31 @@
                   const rm = document.createElement('button');
                   rm.type = 'button';
                   rm.className = 'ws-photo-remove';
-                  rm.setAttribute('aria-label', 'Görseli kaldır');
+                  rm.setAttribute('aria-label', 'Kaldır');
                   rm.textContent = '×';
                   const img = document.createElement('img');
-                  img.src = url;
+                  img.src = wsDisplaySrc(url);
                   img.alt = '';
                   img.loading = 'lazy';
                   img.draggable = false;
-                  img.onerror = function () {
-                    img.onerror = null;
-                    img.src = PLACEHOLDER_IMG;
-                  };
+                  img.onerror = function () { img.onerror = null; img.src = PLACEHOLDER_IMG; };
                   tile.appendChild(handle);
                   tile.appendChild(rm);
                   tile.appendChild(img);
                   return tile;
                 }
-
-                let dragPhotoEl = null;
                 function wsBindPhotoDragDrop(container) {
                   if (!container || container.dataset.dragBound === '1') return;
                   container.dataset.dragBound = '1';
+                  let dragPhotoEl = null;
                   container.addEventListener('dragstart', function (e) {
                     const tile = e.target.closest('.ws-photo-tile');
                     if (!tile || !container.contains(tile)) return;
-                    if (e.target.closest && e.target.closest('.ws-photo-remove')) {
-                      e.preventDefault();
-                      return;
-                    }
+                    if (e.target.closest && e.target.closest('.ws-photo-remove')) { e.preventDefault(); return; }
                     dragPhotoEl = tile;
                     tile.classList.add('ws-photo-tile--dragging');
                     e.dataTransfer.effectAllowed = 'move';
-                    try {
-                      e.dataTransfer.setData('text/plain', 'move');
-                    } catch (err) {}
+                    try { e.dataTransfer.setData('text/plain', 'move'); } catch (err) {}
                   });
                   container.addEventListener('dragend', function () {
                     if (dragPhotoEl) dragPhotoEl.classList.remove('ws-photo-tile--dragging');
@@ -1254,550 +283,230 @@
                     if (!dragPhotoEl || !target || !container.contains(target) || dragPhotoEl === target) return;
                     const rect = target.getBoundingClientRect();
                     const before = e.clientX < rect.left + rect.width / 2;
-                    if (before) {
-                      container.insertBefore(dragPhotoEl, target);
-                    } else {
-                      container.insertBefore(dragPhotoEl, target.nextSibling);
-                    }
+                    if (before) container.insertBefore(dragPhotoEl, target);
+                    else container.insertBefore(dragPhotoEl, target.nextSibling);
                     wsRefreshListingThumb();
+                    wsUpdatePhotoCount();
                   });
                 }
-
-                function wsRenderPhotosFromSeed() {
-                  let s = {};
-                  try { s = JSON.parse(seedEl.textContent); } catch (e) { s = {}; }
-                  const box = document.getElementById('ws-photo-editor');
+                function wsRebuildPhotoEditor(editorId, urls, predicate) {
+                  const box = document.getElementById(editorId);
                   if (!box) return;
                   box.innerHTML = '';
-                  const urls = Array.isArray(s.images) ? s.images : [];
                   urls.forEach(function (u) {
-                    if (typeof u === 'string' && u.trim()) box.appendChild(wsMakePhotoTile(u.trim()));
+                    if (predicate(u)) box.appendChild(wsMakePhotoTile(u.trim()));
                   });
+                }
+                function wsRenderPhotosFromSeed() {
+                  const s = wsReadSeed();
+                  const assets = s.workspace_assets && typeof s.workspace_assets === 'object' ? s.workspace_assets : {};
+                  let aUrls = Array.isArray(assets.amazon_images)
+                    ? assets.amazon_images.slice()
+                    : (Array.isArray(s.images) ? s.images.slice() : []);
+                  aUrls = aUrls.filter(wsIsAmazonUrl).map(function (u) { return u.trim(); });
+                  let mUrls = Array.isArray(assets.mockup_images) ? assets.mockup_images.slice() : [];
+                  mUrls = mUrls.filter(wsIsMockupUrl).map(function (u) { return u.trim(); });
+                  if (!aUrls.length) {
+                    aUrls = wsUrlsFromPhotoEditorDom('ws-photo-editor-amazon', wsIsAmazonUrl);
+                  }
+                  if (!mUrls.length) {
+                    mUrls = wsUrlsFromPhotoEditorDom('ws-photo-editor-mockups', wsIsMockupUrl);
+                  }
+                  wsRebuildPhotoEditor('ws-photo-editor-amazon', aUrls, wsIsAmazonUrl);
+                  wsRebuildPhotoEditor('ws-photo-editor-mockups', mUrls, wsIsMockupUrl);
+                }
+                function wsSwitchTab(source) {
+                  activeSource = source === SOURCE_MOCKUPS ? SOURCE_MOCKUPS : SOURCE_AMAZON;
+                  const pa = document.getElementById('ws-panel-amazon');
+                  const pm = document.getElementById('ws-panel-mockups');
+                  const ba = document.getElementById('ws-tab-amazon');
+                  const bm = document.getElementById('ws-tab-mockups');
+                  if (pa) pa.style.display = activeSource === SOURCE_AMAZON ? '' : 'none';
+                  if (pm) pm.style.display = activeSource === SOURCE_MOCKUPS ? '' : 'none';
+                  if (ba) ba.style.background = activeSource === SOURCE_AMAZON ? 'var(--accent)' : '';
+                  if (ba) ba.style.color = activeSource === SOURCE_AMAZON ? '#fff' : '';
+                  if (bm) bm.style.background = activeSource === SOURCE_MOCKUPS ? 'var(--accent)' : '';
+                  if (bm) bm.style.color = activeSource === SOURCE_MOCKUPS ? '#fff' : '';
                   wsRefreshListingThumb();
                   wsUpdatePhotoCount();
                 }
-
-                function wsCountVarDims() {
-                  return document.querySelectorAll('#ws-variations-editor .ws-var-dim').length;
-                }
-
-                function wsUpdateVarAddButtonState() {
-                  const btn = document.getElementById('ws_var_add_dim');
-                  if (!btn) return;
-                  const n = wsCountVarDims();
-                  btn.disabled = n >= 2;
-                  btn.style.opacity = n >= 2 ? '0.5' : '1';
-                  if (n === 0) btn.textContent = 'Birincil varyasyon ekle';
-                  else if (n === 1) btn.textContent = 'İkincil varyasyon ekle';
-                  else btn.textContent = 'En fazla 2 varyasyon';
-                }
-
-                function wsCreateChip(text) {
-                  const t = (text || '').trim();
-                  if (!t) return null;
-                  const sp = document.createElement('span');
-                  sp.className = 'ws-var-chip';
-                  sp.setAttribute('data-value', t);
-                  const tx = document.createElement('span');
-                  tx.className = 'ws-var-chip-text';
-                  tx.textContent = t;
-                  const bx = document.createElement('button');
-                  bx.type = 'button';
-                  bx.className = 'ws-var-chip-x';
-                  bx.setAttribute('aria-label', 'Kaldır');
-                  bx.textContent = '×';
-                  sp.appendChild(tx);
-                  sp.appendChild(bx);
-                  return sp;
-                }
-
-                function wsSyncSuggestForDim(dim) {
-                  const nameIn = dim.querySelector('.ws-var-name');
-                  const sug = dim.querySelector('.ws-var-suggest');
-                  if (!nameIn || !sug) return;
-                  const v = nameIn.value.trim();
-                  let match = '';
-                  sug.querySelectorAll('option').forEach(function (o) {
-                    if (o.value && o.value === v) match = o.value;
+                function wsBuildDraftObject() {
+                  var d = {};
+                  try { d = JSON.parse(seedEl.textContent); } catch (err) { d = {}; }
+                  var amazonUrls = wsGetPhotoUrls(SOURCE_AMAZON);
+                  var mockupUrls = wsGetPhotoUrls(SOURCE_MOCKUPS);
+                  var tagsEditor = document.getElementById('ws_tags_editor');
+                  var tagsRaw = tagsEditor ? (tagsEditor.value || '') : '';
+                  var tags = tagsRaw
+                    .split(',')
+                    .map(function (x) { return (x || '').trim().toLowerCase(); })
+                    .filter(function (x) { return x.length > 0; });
+                  var uniq = [];
+                  tags.forEach(function (t) {
+                    if (uniq.indexOf(t) !== -1) return;
+                    uniq.push(t.length > 20 ? t.slice(0, 20).trim() : t);
                   });
-                  sug.value = match;
+                  tags = uniq.slice(0, 13);
+                  d.workspace_assets = d.workspace_assets && typeof d.workspace_assets === 'object' ? d.workspace_assets : {};
+                  d.workspace_assets.amazon_images = amazonUrls.slice();
+                  d.workspace_assets.mockup_images = mockupUrls.slice();
+                  d.workspace_assets.active_source = activeSource;
+                  d.images = activeSource === SOURCE_MOCKUPS ? mockupUrls.slice() : amazonUrls.slice();
+                  if (!Array.isArray(d.keywords)) d.keywords = [];
+                  d.tags = tags;
+                  if (!Array.isArray(d.variations)) d.variations = [];
+                  if (d.workspace_meta) delete d.workspace_meta;
+                  return d;
                 }
-
-                function wsBindVariationCardEvents(dim) {
-                  if (!dim || dim.dataset.wsVarBound === '1') return;
-                  dim.dataset.wsVarBound = '1';
-                  const sug = dim.querySelector('.ws-var-suggest');
-                  const nameIn = dim.querySelector('.ws-var-name');
-                  const chipInp = dim.querySelector('.ws-var-chip-input');
-                  const chips = dim.querySelector('.ws-var-chips');
-                  if (sug && nameIn) {
-                    sug.addEventListener('change', function () {
-                      if (sug.value) nameIn.value = sug.value;
-                    });
-                    nameIn.addEventListener('input', function () {
-                      wsSyncSuggestForDim(dim);
-                    });
-                  }
-                  if (chipInp && chips) {
-                    chipInp.addEventListener('keydown', function (e) {
-                      if (e.key !== 'Enter') return;
-                      e.preventDefault();
-                      const ch = wsCreateChip(chipInp.value);
-                      if (ch) chips.appendChild(ch);
-                      chipInp.value = '';
-                    });
-                  }
-                }
-
-                function wsMakeVarDim(slotIdx, name, valuesArr) {
-                  const titles = ['Birincil varyasyon', 'İkincil varyasyon'];
-                  const wrap = document.createElement('div');
-                  wrap.className = 'ws-var-dim ws-var-etsy-card';
-                  const head = document.createElement('div');
-                  head.className = 'ws-var-etsy-head';
-                  const ttl = document.createElement('span');
-                  ttl.className = 'ws-var-etsy-label';
-                  ttl.textContent = titles[Math.min(slotIdx, 1)] || titles[0];
-                  const rm = document.createElement('button');
-                  rm.type = 'button';
-                  rm.className = 'btn btn-secondary ws-var-remove-dim';
-                  rm.textContent = 'Kaldır';
-                  head.appendChild(ttl);
-                  head.appendChild(rm);
-                  const propWrap = document.createElement('div');
-                  const pl = document.createElement('span');
-                  pl.className = 'ws-var-field-label';
-                  pl.textContent = 'Özellik';
-                  const nameRow = document.createElement('div');
-                  nameRow.className = 'ws-var-name-row';
-                  const sug = document.createElement('select');
-                  sug.className = 'ws-var-suggest';
-                  sug.setAttribute('aria-label', 'Hazır özellik tipi');
-                  [['', 'Özel ad…'], ['Color', 'Renk (Color)'], ['Size', 'Beden (Size)'], ['Material', 'Malzeme (Material)'], ['Style', 'Stil (Style)'], ['Dimensions', 'Ölçü (Dimensions)']].forEach(function (pair) {
-                    const o = document.createElement('option');
-                    o.value = pair[0];
-                    o.textContent = pair[1];
-                    sug.appendChild(o);
-                  });
-                  const nameIn = document.createElement('input');
-                  nameIn.type = 'text';
-                  nameIn.className = 'ws-var-name';
-                  nameIn.placeholder = 'Örn. Color, Size';
-                  nameIn.value = name || '';
-                  nameRow.appendChild(sug);
-                  nameRow.appendChild(nameIn);
-                  propWrap.appendChild(pl);
-                  propWrap.appendChild(nameRow);
-                  const optWrap = document.createElement('div');
-                  const ol = document.createElement('span');
-                  ol.className = 'ws-var-field-label';
-                  ol.textContent = 'Seçenekler';
-                  const chips = document.createElement('div');
-                  chips.className = 'ws-var-chips';
-                  (valuesArr || []).forEach(function (val) {
-                    const ch = wsCreateChip(String(val));
-                    if (ch) chips.appendChild(ch);
-                  });
-                  const chipInp = document.createElement('input');
-                  chipInp.type = 'text';
-                  chipInp.className = 'ws-var-chip-input';
-                  chipInp.placeholder = 'Seçenek yazın, Enter ile ekleyin';
-                  chipInp.setAttribute('autocomplete', 'off');
-                  optWrap.appendChild(ol);
-                  optWrap.appendChild(chips);
-                  optWrap.appendChild(chipInp);
-                  wrap.appendChild(head);
-                  wrap.appendChild(propWrap);
-                  wrap.appendChild(optWrap);
-                  wsSyncSuggestForDim(wrap);
-                  wsBindVariationCardEvents(wrap);
-                  return wrap;
-                }
-
-                function wsRenderVariationsFromSeed() {
-                  let s = {};
-                  try { s = JSON.parse(seedEl.textContent); } catch (e) { s = {}; }
-                  const box = document.getElementById('ws-variations-editor');
-                  if (!box) return;
-                  box.innerHTML = '';
-                  const vars = Array.isArray(s.variations) ? s.variations : [];
-                  vars.forEach(function (item, idx) {
-                    if (!item || typeof item !== 'object') return;
-                    const nm = String(item.name || '');
-                    const vals = Array.isArray(item.values) ? item.values : [];
-                    box.appendChild(wsMakeVarDim(idx, nm, vals));
-                  });
-                  wsUpdateVarAddButtonState();
-                }
-
-                function wsGetVariationPresets() {
-                  const el = document.getElementById('variation-presets-data');
-                  if (!el) return {};
+                window.wsBuildDraft = function (e) {
+                  e.preventDefault();
+                  document.getElementById('field_draft_json').value = JSON.stringify(wsBuildDraftObject());
+                  document.getElementById('form-publish').submit();
+                  return false;
+                };
+                window.wsReset = function () {
                   try {
-                    return JSON.parse(el.textContent || '{}');
-                  } catch (e) {
-                    return {};
+                    wsRenderPhotosFromSeed();
+                    wsSwitchTab('{{ ws.active_source|default("amazon") }}');
+                  } catch (err) {}
+                };
+                window.wsGenerateTags = function (e) {
+                  if (e && e.preventDefault) e.preventDefault();
+                  document.getElementById('field_tag_json').value = JSON.stringify(wsBuildDraftObject());
+                  document.getElementById('form-generate-tags').submit();
+                  return false;
+                };
+                window.wsGenerateMockups = function (e) {
+                  if (e && e.preventDefault) e.preventDefault();
+                  const whiteFile = document.getElementById('ws_design_white_file');
+                  const blackFile = document.getElementById('ws_design_black_file');
+                  if (!whiteFile || !blackFile) return false;
+                  if (!whiteFile.files || !whiteFile.files.length) {
+                    alert('White design dosyasını seçin.');
+                    return false;
                   }
-                }
-
-                function wsApplyVariationPreset(presetKey) {
-                  const box = document.getElementById('ws-variations-editor');
-                  if (!box) return;
-                  const key = (presetKey || 'custom').trim();
-                  if (key === 'custom') {
-                    wsRenderVariationsFromSeed();
-                    return;
+                  if (!blackFile.files || !blackFile.files.length) {
+                    alert('Black design dosyasını seçin.');
+                    return false;
                   }
-                  const all = wsGetVariationPresets();
-                  const p = all[key];
-                  if (!p || typeof p !== 'object' || !p.type1 || !p.type2) return;
-                  const n1 = String(p.type1.name || 'Size');
-                  const n2 = String(p.type2.name || 'Color');
-                  const o1 = Array.isArray(p.type1.options) ? p.type1.options : [];
-                  const o2 = Array.isArray(p.type2.options) ? p.type2.options : [];
-                  box.innerHTML = '';
-                  box.appendChild(wsMakeVarDim(0, n1, o1));
-                  box.appendChild(wsMakeVarDim(1, n2, o2));
-                  wsUpdateVarAddButtonState();
-                }
-
-                function wsCollectVariations() {
-                  const out = [];
-                  document.querySelectorAll('#ws-variations-editor .ws-var-dim').forEach(function (el) {
-                    const nameIn = el.querySelector('.ws-var-name');
-                    const name = nameIn && nameIn.value ? nameIn.value.trim() : '';
-                    const values = [];
-                    el.querySelectorAll('.ws-var-chips .ws-var-chip').forEach(function (ch) {
-                      const dv = ch.getAttribute('data-value');
-                      if (dv && dv.trim()) values.push(dv.trim());
-                    });
-                    if (name || values.length) {
-                      out.push({ name: name || 'Option', values: values });
-                    }
+                  const selected = [];
+                  document.querySelectorAll('.ws-mockup-pick.ws-mockup-pick--selected').forEach(function(btn){
+                    const u = (btn.getAttribute('data-url') || '').trim();
+                    if (u) selected.push(u);
                   });
-                  return out;
+                  if (!selected.length) {
+                    alert('Lutfen en az bir mockup template secin.');
+                    return false;
+                  }
+                  document.getElementById('field_selected_template_urls').value = JSON.stringify(selected);
+                  document.getElementById('field_mockup_json').value = JSON.stringify(wsBuildDraftObject());
+                  document.getElementById('form-generate-mockups').submit();
+                  return false;
+                };
+                function wsBindDropZone(zoneId, inputId, labelId) {
+                  const zone = document.getElementById(zoneId);
+                  const input = document.getElementById(inputId);
+                  const nameEl = document.getElementById(labelId);
+                  if (!zone || !input) return;
+                  function setFile(file) {
+                    if (!file) return;
+                    const dt = new DataTransfer();
+                    dt.items.add(file);
+                    input.files = dt.files;
+                    if (nameEl) nameEl.textContent = file.name;
+                  }
+                  zone.addEventListener('click', function () { input.click(); });
+                  input.addEventListener('change', function () {
+                    if (input.files && input.files.length && nameEl) nameEl.textContent = input.files[0].name;
+                  });
+                  ['dragenter', 'dragover'].forEach(function(evt){
+                    zone.addEventListener(evt, function(ev){
+                      ev.preventDefault();
+                      zone.style.borderColor = 'var(--accent)';
+                      zone.style.background = '#eef2ff';
+                    });
+                  });
+                  ['dragleave', 'drop'].forEach(function(evt){
+                    zone.addEventListener(evt, function(ev){
+                      ev.preventDefault();
+                      zone.style.borderColor = '';
+                      zone.style.background = '#fff';
+                    });
+                  });
+                  zone.addEventListener('drop', function (ev) {
+                    const files = ev.dataTransfer && ev.dataTransfer.files;
+                    if (!files || !files.length) return;
+                    setFile(files[0]);
+                  });
                 }
-
-                const photoBox = document.getElementById('ws-photo-editor');
-                if (photoBox) {
+                const amazonBox = document.getElementById('ws-photo-editor-amazon');
+                const mockupBox = document.getElementById('ws-photo-editor-mockups');
+                [amazonBox, mockupBox].forEach(function(photoBox) {
+                  if (!photoBox) return;
                   wsBindPhotoDragDrop(photoBox);
                   photoBox.addEventListener('click', function (ev) {
                     const btn = ev.target.closest('.ws-photo-remove');
                     if (!btn || !photoBox.contains(btn)) return;
                     const tile = btn.closest('.ws-photo-tile');
-                    if (tile) {
-                      tile.remove();
-                      wsRefreshListingThumb();
-                      wsUpdatePhotoCount();
-                    }
+                    if (tile) { tile.remove(); wsRefreshListingThumb(); wsUpdatePhotoCount(); }
                   });
-                }
-
-                const varBox = document.getElementById('ws-variations-editor');
-                if (varBox) {
-                  varBox.addEventListener('click', function (ev) {
-                    const cx = ev.target.closest('.ws-var-chip-x');
-                    if (cx && varBox.contains(cx)) {
-                      const chip = cx.closest('.ws-var-chip');
-                      if (chip) chip.remove();
-                      return;
-                    }
-                    const btn = ev.target.closest('.ws-var-remove-dim');
-                    if (!btn || !varBox.contains(btn)) return;
-                    const dim = btn.closest('.ws-var-dim');
-                    if (dim) {
-                      dim.remove();
-                      wsUpdateVarAddButtonState();
-                    }
-                  });
-                }
-
+                });
                 const addPhotoBtn = document.getElementById('ws_photo_add_btn');
                 const addPhotoInp = document.getElementById('ws_photo_add_url');
-                if (addPhotoBtn && addPhotoInp && photoBox) {
+                if (addPhotoBtn && addPhotoInp && amazonBox) {
                   addPhotoBtn.addEventListener('click', function () {
-                    const u = (addPhotoInp.value || '').trim();
-                    if (!u) return;
-                    photoBox.appendChild(wsMakePhotoTile(u));
+                    var u = (addPhotoInp.value || '').trim();
+                    if (!u || !wsIsAmazonUrl(u)) return;
+                    amazonBox.appendChild(wsMakePhotoTile(u));
                     addPhotoInp.value = '';
                     wsRefreshListingThumb();
                     wsUpdatePhotoCount();
                   });
                 }
-
-                const addVarBtn = document.getElementById('ws_var_add_dim');
-                if (addVarBtn && varBox) {
-                  addVarBtn.addEventListener('click', function () {
-                    if (wsCountVarDims() >= 2) return;
-                    varBox.appendChild(wsMakeVarDim(wsCountVarDims(), '', []));
-                    wsUpdateVarAddButtonState();
-                  });
-                }
-
-                if (varBox) {
-                  document.querySelectorAll('#ws-variations-editor .ws-var-dim').forEach(wsBindVariationCardEvents);
-                }
-
-                const presetSel = document.getElementById('ws_variation_preset');
-                if (presetSel && varBox) {
-                  presetSel.addEventListener('change', function () {
-                    wsApplyVariationPreset(presetSel.value);
-                  });
-                  const initialPreset = (presetSel.value || 'custom').trim();
-                  if (initialPreset !== 'custom') wsApplyVariationPreset(initialPreset);
-                }
-
-                function titleCount() {
-                  const t = document.getElementById('ws_title');
-                  const c = document.getElementById('title-count');
-                  if (t && c) c.textContent = (t.value || '').length;
-                }
-                const titleInput = document.getElementById('ws_title');
-                if (titleInput) {
-                  titleInput.addEventListener('input', titleCount);
-                  titleCount();
-                }
-
-                wsUpdatePhotoCount();
-                wsUpdateVarAddButtonState();
-
-                window.wsReset = function () {
-                  try {
-                    const s = JSON.parse(seedEl.textContent);
-                    if (s.title) document.getElementById('ws_title').value = s.title;
-                    if (s.description_text) document.getElementById('ws_description').value = s.description_text;
-                    const tags = Array.isArray(s.tags) ? s.tags.join(', ') : '';
-                    document.getElementById('ws_tags').value = tags;
-                    const wm = s.workspace_meta && typeof s.workspace_meta === 'object' ? s.workspace_meta : {};
-                    const cat = document.getElementById('ws_category_taxonomy');
-                    if (cat && wm.category_taxonomy) cat.value = wm.category_taxonomy;
-                    const shipSel = document.getElementById('ws_shipping_profile_id');
-                    if (shipSel) {
-                      shipSel.value =
-                        wm.shipping_profile_id != null && String(wm.shipping_profile_id) !== ''
-                          ? String(wm.shipping_profile_id)
-                          : '';
+                document.querySelectorAll('.ws-mockup-pick').forEach(function(btn) {
+                  btn.addEventListener('click', function() {
+                    const u = (btn.getAttribute('data-url') || '').trim();
+                    if (!u || !wsIsMockupUrl(u)) return;
+                    btn.classList.toggle('ws-mockup-pick--selected');
+                    if (btn.classList.contains('ws-mockup-pick--selected')) {
+                      btn.style.outline = '2px solid var(--accent)';
+                      btn.style.outlineOffset = '2px';
+                    } else {
+                      btn.style.outline = '';
+                      btn.style.outlineOffset = '';
                     }
-                    const vp = document.getElementById('ws_variation_preset');
-                    if (vp && wm.variation_preset) vp.value = wm.variation_preset;
-                    wsRenderPhotosFromSeed();
-                    if (vp && vp.value && vp.value !== 'custom') wsApplyVariationPreset(vp.value);
-                    else wsRenderVariationsFromSeed();
-                    titleCount();
-                  } catch (e) {}
-                };
-
-                window.wsBuildDraft = function (e) {
-                  e.preventDefault();
-                  let d = {};
-                  try { d = JSON.parse(seedEl.textContent); } catch (err) { d = {}; }
-                  d.title = (document.getElementById('ws_title') && document.getElementById('ws_title').value) || '';
-                  d.description_text = (document.getElementById('ws_description') && document.getElementById('ws_description').value) || '';
-                  d.images = wsGetPhotoUrls();
-                  d.variations = wsCollectVariations();
-                  const tagStr = (document.getElementById('ws_tags') && document.getElementById('ws_tags').value) || '';
-                  d.tags = tagStr.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-                  d.workspace_meta = d.workspace_meta || {};
-                  d.workspace_meta.who_made = (document.getElementById('ws_who') && document.getElementById('ws_who').value) || 'i_did';
-                  d.workspace_meta.what_is_it = (document.getElementById('ws_what') && document.getElementById('ws_what').value) || 'a_finished_product';
-                  d.workspace_meta.when_made = (document.getElementById('ws_when') && document.getElementById('ws_when').value) || 'made_to_order';
-                  d.workspace_meta.variation_preset = (document.getElementById('ws_variation_preset') && document.getElementById('ws_variation_preset').value) || 'custom';
-                  d.workspace_meta.sku = (document.getElementById('ws_sku') && document.getElementById('ws_sku').value) || '';
-                  d.workspace_meta.quantity = (document.getElementById('ws_qty') && document.getElementById('ws_qty').value) || '1';
-                  d.workspace_meta.section = (document.getElementById('ws_section') && document.getElementById('ws_section').value) || '';
-                  d.workspace_meta.category_taxonomy = (document.getElementById('ws_category_taxonomy') && document.getElementById('ws_category_taxonomy').value) || 'tshirts';
-                  const shipEl = document.getElementById('ws_shipping_profile_id');
-                  d.workspace_meta.shipping_profile_id = shipEl && shipEl.value ? shipEl.value : '';
-                  const r = document.querySelector('input[name=ws_renewal]:checked');
-                  d.workspace_meta.renewal = r ? r.value : 'manual';
-                  const lt = document.querySelector('input[name=ws_ltype]:checked');
-                  d.workspace_meta.listing_type = lt ? lt.value : 'physical';
-                  const p = document.querySelector('input[name=ws_pers]:checked');
-                  d.workspace_meta.personalization = p ? p.value : 'off';
-                  document.getElementById('field_draft_json').value = JSON.stringify(d);
-                  document.getElementById('form-publish').submit();
-                  return false;
-                };
+                  });
+                });
+                const tabA = document.getElementById('ws-tab-amazon');
+                const tabM = document.getElementById('ws-tab-mockups');
+                if (tabA) tabA.addEventListener('click', function(){ wsSwitchTab(SOURCE_AMAZON); });
+                if (tabM) tabM.addEventListener('click', function(){ wsSwitchTab(SOURCE_MOCKUPS); });
+                wsBindDropZone('ws_drop_white', 'ws_design_white_file', 'ws_drop_white_name');
+                wsBindDropZone('ws_drop_black', 'ws_design_black_file', 'ws_drop_black_name');
+                (function wsInitTagsEditor() {
+                  const tagsEl = document.getElementById('ws_tags_editor');
+                  const countEl = document.getElementById('ws-tags-count');
+                  if (!tagsEl) return;
+                  const s = wsReadSeed();
+                  const raw = Array.isArray(s.tags) ? s.tags : [];
+                  const tags = raw.map(function (x) { return (x || '').toString().trim(); }).filter(Boolean).slice(0, 13);
+                  tagsEl.value = tags.join(', ');
+                  function refreshCount() {
+                    const parsed = (tagsEl.value || '')
+                      .split(',')
+                      .map(function (x) { return (x || '').trim(); })
+                      .filter(Boolean);
+                    const uniq = [];
+                    parsed.forEach(function (t) { if (uniq.indexOf(t) === -1) uniq.push(t); });
+                    if (countEl) countEl.textContent = uniq.slice(0, 13).length + '/13 tag';
+                  }
+                  tagsEl.addEventListener('input', refreshCount);
+                  refreshCount();
+                })();
+                wsRenderPhotosFromSeed();
+                wsSwitchTab(activeSource);
               })();
             </script>
             {% endif %}
           </div>
-          {% elif active_tab == 'drafts' %}
-          <div class="tab-page drafts-table-wrap">
-            <table class="drafts-table">
-              <thead>
-                <tr>
-                  <th></th>
-                  <th>Başlık</th>
-                  <th>Listing ID</th>
-                  <th>Fiyat</th>
-                  <th>İşlem</th>
-                </tr>
-              </thead>
-              <tbody>
-                {% for row in app_draft_listings %}
-                <tr>
-                  <td>
-                    {% if row.image %}
-                    <img class="draft-thumb" src="{{ row.image|e }}" alt="" loading="lazy" onerror="this.style.opacity=0.25" />
-                    {% else %}—{% endif %}
-                  </td>
-                  <td>{{ row.title|e }}</td>
-                  <td>{{ row.listing_id }}</td>
-                  <td>{{ row.price|e }}</td>
-                  <td>
-                    <div class="draft-actions">
-                      <form method="post" action="/drafts/open">
-                        <input type="hidden" name="listing_id" value="{{ row.listing_id }}" />
-                        <button type="submit" class="btn btn-secondary" style="padding:6px 12px;font-size:0.8rem;">Workspace’te aç</button>
-                      </form>
-                      <form method="post" action="/drafts/delete" onsubmit="return confirm('Bu listing Etsy’den de silinsin mi?');">
-                        <input type="hidden" name="listing_id" value="{{ row.listing_id }}" />
-                        <button type="submit" class="btn btn-secondary" style="padding:6px 12px;font-size:0.8rem;color:var(--danger-text);border-color:#f5c2c7;background:var(--danger-bg);">Sil</button>
-                      </form>
-                    </div>
-                  </td>
-                </tr>
-                {% else %}
-                <tr>
-                  <td colspan="5" style="text-align:center;color:var(--text-muted);padding:28px;">Henüz kayıtlı draft yok. Workspace’te yayınladığınız listing’ler burada listelenir.</td>
-                </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-          {% elif active_tab == 'presets' %}
-          {% macro preset_data_body(pfx, options, prices, colors) -%}
-          {% set pr = prices or [] %}
-          {% set op = options if options and options|length > 0 else [''] %}
-          {% set co = colors if colors and colors|length > 0 else [''] %}
-          <div class="preset-body-cols">
-            <div class="pbc-col" id="{{ pfx }}-col-size">
-              {% for o in op %}
-              <div class="preset-field-line">
-                <input type="text" class="preset-size-opt" name="{{ pfx }}_type1_opts" value="{{ o|e }}" placeholder="Beden / stil" autocomplete="off" />
-              </div>
-              {% endfor %}
-            </div>
-            <div class="pbc-col" id="{{ pfx }}-col-price">
-              {% for o in op %}
-              <div class="preset-field-line">
-                <div class="preset-price-wrap">
-                  <span class="preset-currency">$</span>
-                  <input type="number" class="preset-size-price" name="{{ pfx }}_type1_opt_prices" value="{% if loop.index0 < pr|length %}{{ pr[loop.index0]|e }}{% endif %}" placeholder="0.00" step="0.01" min="0" inputmode="decimal" autocomplete="off" />
-                </div>
-              </div>
-              {% endfor %}
-            </div>
-            <div class="pbc-col" id="{{ pfx }}-col-color">
-              {% for c in co %}
-              <div class="preset-field-line">
-                <input type="text" class="preset-size-opt" name="{{ pfx }}_type2_opts" value="{{ c|e }}" placeholder="Renk" autocomplete="off" />
-              </div>
-              {% endfor %}
-            </div>
-          </div>
-          {%- endmacro %}
-          {% macro preset_product_block(title, pfx, vp) -%}
-              <div class="preset-block">
-                <h3>{{ title }}</h3>
-                <div class="preset-size-cols">
-                  <div class="preset-size-head">Size</div>
-                  <div class="preset-size-head">Fiyat</div>
-                  <div class="preset-size-head">Color</div>
-                  <input type="text" id="{{ pfx }}_type1_name" name="{{ pfx }}_type1_name" value="{{ vp.type1.name|e }}" placeholder="Örn. Size" autocomplete="off" />
-                  <span aria-hidden="true"></span>
-                  <input type="text" id="{{ pfx }}_type2_name" name="{{ pfx }}_type2_name" value="{{ vp.type2.name|e }}" placeholder="Örn. Color" autocomplete="off" />
-                </div>
-                {{ preset_data_body(pfx, vp.type1.options, vp.type1.prices, vp.type2.options) }}
-                <div class="preset-add-row">
-                  <button type="button" class="btn btn-secondary preset-add-size" data-preset-add-sizes="{{ pfx }}">+ Beden ekle</button>
-                  <button type="button" class="btn btn-secondary preset-add-color" data-preset-add-colors="{{ pfx }}">+ Renk ekle</button>
-                </div>
-              </div>
-          {%- endmacro %}
-
-          <div class="tab-page">
-            <form method="post" action="/presets/save">
-              {{ preset_product_block('Shirt', 'shirt', variation_presets.shirt) }}
-              {{ preset_product_block('Sweatshirt &amp; hoodie', 'sweat', variation_presets.sweatshirt) }}
-              {{ preset_product_block('Comfort Colors', 'cc', variation_presets.comfort_colors) }}
-              <button type="submit" class="btn btn-primary">Presetleri kaydet</button>
-            </form>
-            <script>
-              (function () {
-                function clearPresetPriceIfInvalid(input) {
-                  if (!input || input.type !== 'number' || !input.classList.contains('preset-size-price')) return;
-                  var raw = (input.value || '').trim();
-                  if (raw === '') return;
-                  if (input.validity && input.validity.badInput) {
-                    input.value = '';
-                    return;
-                  }
-                  var n = input.valueAsNumber;
-                  if (!Number.isFinite(n) || n < 0) {
-                    input.value = '';
-                  }
-                }
-                var presetForm = document.querySelector('form[action="/presets/save"]');
-                if (presetForm) {
-                  presetForm.addEventListener('focusout', function (e) {
-                    clearPresetPriceIfInvalid(e.target);
-                  });
-                  presetForm.addEventListener('submit', function () {
-                    presetForm.querySelectorAll('input.preset-size-price[type="number"]').forEach(clearPresetPriceIfInvalid);
-                  });
-                }
-                var cfg = {
-                  shirt: { opts: 'shirt_type1_opts', prices: 'shirt_type1_opt_prices' },
-                  sweat: { opts: 'sweat_type1_opts', prices: 'sweat_type1_opt_prices' },
-                  cc: { opts: 'cc_type1_opts', prices: 'cc_type1_opt_prices' }
-                };
-                var colorNames = { shirt: 'shirt_type2_opts', sweat: 'sweat_type2_opts', cc: 'cc_type2_opts' };
-                function addRow(pfx) {
-                  var cs = document.getElementById(pfx + '-col-size');
-                  var cq = document.getElementById(pfx + '-col-price');
-                  var c = cfg[pfx];
-                  if (!cs || !cq || !c) return;
-                  var ls = document.createElement('div');
-                  ls.className = 'preset-field-line';
-                  ls.innerHTML = '<input type="text" class="preset-size-opt" name="' + c.opts + '" value="" placeholder="Beden / stil" autocomplete="off" />';
-                  var lq = document.createElement('div');
-                  lq.className = 'preset-field-line';
-                  lq.innerHTML =
-                    '<div class="preset-price-wrap">' +
-                    '<span class="preset-currency">$</span>' +
-                    '<input type="number" class="preset-size-price" name="' + c.prices + '" value="" placeholder="0.00" step="0.01" min="0" inputmode="decimal" autocomplete="off" />' +
-                    '</div>';
-                  cs.appendChild(ls);
-                  cq.appendChild(lq);
-                }
-                function addColorRow(pfx) {
-                  var cc = document.getElementById(pfx + '-col-color');
-                  var nm = colorNames[pfx];
-                  if (!cc || !nm) return;
-                  var row = document.createElement('div');
-                  row.className = 'preset-field-line';
-                  row.innerHTML =
-                    '<input type="text" class="preset-size-opt" name="' + nm + '" value="" placeholder="Renk" autocomplete="off" />';
-                  cc.appendChild(row);
-                }
-                document.querySelectorAll('[data-preset-add-sizes]').forEach(function (btn) {
-                  btn.addEventListener('click', function () {
-                    addRow(btn.getAttribute('data-preset-add-sizes'));
-                  });
-                });
-                document.querySelectorAll('[data-preset-add-colors]').forEach(function (btn) {
-                  btn.addEventListener('click', function () {
-                    addColorRow(btn.getAttribute('data-preset-add-colors'));
-                  });
-                });
-              })();
-            </script>
-          </div>
-          {% endif %}
-        </div>
-      </div>
-    </div>
-  </body>
-</html>
+{% endblock %}

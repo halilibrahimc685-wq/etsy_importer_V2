@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>{% block title %}Etsy Lab{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <style>
+      :root {
+        --bg-page: #f0f2f5;
+        --bg-card: #ffffff;
+        --sidebar: #1a2332;
+        --sidebar-hover: #243044;
+        --text: #1c1e21;
+        --text-muted: #65676b;
+        --border: #e4e6eb;
+        --accent: #4f6bed;
+        --accent-hover: #3d5bd4;
+        --accent-soft: rgba(79, 107, 237, 0.12);
+        --danger-bg: #fde8e8;
+        --danger-text: #b42318;
+        --success-bg: #e6f4ea;
+        --success-text: #137333;
+        --radius: 12px;
+        --shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 4px 12px rgba(0, 0, 0, 0.04);
+        --font: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; font-family: var(--font); color: var(--text); background: var(--bg-page); min-height: 100vh; }
+      .app { display: flex; min-height: 100vh; }
+      .sidebar {
+        width: 240px; flex-shrink: 0; background: var(--sidebar); color: #e8eaed;
+        padding: 20px 0; display: flex; flex-direction: column;
+      }
+      .sidebar-brand {
+        padding: 0 20px 24px; font-weight: 700; font-size: 1.05rem; letter-spacing: -0.02em;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08); margin-bottom: 8px;
+        display: block; text-decoration: none; color: #e8eaed;
+      }
+      .sidebar-brand span { color: var(--accent); opacity: 0.95; }
+      .nav-item {
+        display: flex; align-items: center; gap: 12px; padding: 12px 20px; color: #b8bcc8;
+        text-decoration: none; font-size: 0.9rem; font-weight: 500;
+      }
+      .nav-item:hover { background: var(--sidebar-hover); color: #fff; }
+      .nav-item.active {
+        background: rgba(79, 107, 237, 0.2); color: #fff; border-left: 3px solid var(--accent); padding-left: 17px;
+      }
+      .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+      .topbar {
+        background: var(--bg-card); border-bottom: 1px solid var(--border);
+        padding: 16px 28px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px;
+      }
+      .topbar h1 { margin: 0; font-size: 1.35rem; font-weight: 700; letter-spacing: -0.03em; }
+      .topbar-meta { font-size: 0.8rem; color: var(--text-muted); margin-top: 4px; }
+      .content { padding: 24px 28px 40px; max-width: 920px; }
+      .content--wide { max-width: 1120px; }
+      .alert {
+        padding: 14px 18px; border-radius: var(--radius); margin-bottom: 20px;
+        font-size: 0.9rem; line-height: 1.45;
+      }
+      .alert-error { background: var(--danger-bg); color: var(--danger-text); border: 1px solid #f5c4c6; }
+      .alert-success { background: var(--success-bg); color: var(--success-text); border: 1px solid #b7e0c4; }
+      .alert-warning { background: #fff5e6; color: #8a5a00; border: 1px solid #f3d19c; }
+      .btn {
+        display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+        padding: 11px 20px; border: none; border-radius: 8px; font-family: inherit;
+        font-size: 0.9rem; font-weight: 600; cursor: pointer; transition: background 0.15s, opacity 0.1s;
+      }
+      .btn-primary { background: var(--accent); color: #fff; }
+      .btn-primary:hover { background: var(--accent-hover); }
+      .btn-secondary { background: var(--bg-page); color: var(--text); border: 1px solid var(--border); }
+      .btn-secondary:hover { background: #e8eaed; }
+      .hint { font-size: 0.82rem; color: var(--text-muted); line-height: 1.45; margin: 0; }
+      .ws-page { max-width: 900px; }
+      .ws-toolbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 18px; }
+      .link-back { color: var(--text-muted); text-decoration: none; font-size: 0.9rem; font-weight: 600; }
+      .link-back:hover { color: var(--accent); }
+      .ws-search-box {
+        flex: 1; min-width: 200px; display: flex; align-items: center; gap: 10px;
+        background: var(--bg-card); border: 1px solid var(--border); border-radius: 999px;
+        padding: 8px 14px; box-shadow: var(--shadow);
+      }
+      .ws-search-box input { border: none; flex: 1; font-family: inherit; font-size: 0.88rem; outline: none; background: transparent; }
+      .check-row { display: flex; align-items: center; gap: 10px; font-size: 0.82rem; cursor: pointer; }
+      .check-row input { width: 16px; height: 16px; accent-color: var(--accent); }
+      .card {
+        background: var(--bg-card); border-radius: var(--radius); border: 1px solid var(--border);
+        box-shadow: var(--shadow); padding: 22px 24px; margin-bottom: 20px;
+      }
+      .listing-strip {
+        background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+        padding: 16px 18px; margin-bottom: 20px; display: flex; gap: 16px; align-items: flex-start; box-shadow: var(--shadow);
+      }
+      .listing-strip .thumb {
+        width: 72px; height: 72px; object-fit: contain; border-radius: 8px;
+        border: 1px solid var(--border); background: #f3f4f6;
+      }
+      .listing-strip .meta small { color: var(--text-muted); font-size: 0.75rem; }
+      .listing-strip .meta h3 { margin: 4px 0 6px; font-size: 0.95rem; font-weight: 600; }
+      .ws-section {
+        background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+        margin-bottom: 16px; overflow: hidden; box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+      }
+      .ws-section-head {
+        font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+        color: var(--text-muted); padding: 10px 18px; background: #fafbfc; border-bottom: 1px solid var(--border);
+      }
+      .ws-section-body { padding: 16px 18px; }
+      .ws-row { display: grid; grid-template-columns: 160px 1fr; gap: 16px 20px; align-items: start; margin-bottom: 14px; }
+      .ws-row:last-child { margin-bottom: 0; }
+      .ws-label { font-size: 0.88rem; font-weight: 600; padding-top: 8px; }
+      @media (max-width: 640px) { .ws-row { grid-template-columns: 1fr; } .ws-label { padding-top: 0; } }
+      .ws-photo-editor {
+        display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; margin-bottom: 14px; touch-action: manipulation;
+      }
+      .ws-photo-tile {
+        position: relative; width: 104px; height: 104px; flex-shrink: 0; border-radius: 8px;
+        overflow: hidden; border: 1px solid var(--border); background: #f3f4f6; cursor: grab; touch-action: manipulation;
+      }
+      .ws-photo-tile:active { cursor: grabbing; }
+      .ws-photo-tile--dragging { opacity: 0.5; outline: 2px dashed var(--accent); outline-offset: 2px; }
+      .ws-photo-tile img { width: 100%; height: 100%; object-fit: contain; display: block; pointer-events: none; user-select: none; }
+      .ws-photo-handle {
+        position: absolute; left: 4px; bottom: 4px; padding: 2px 6px; border-radius: 4px;
+        background: rgba(255, 255, 255, 0.92); border: 1px solid var(--border); font-size: 0.65rem;
+        font-weight: 700; color: var(--text-muted); pointer-events: none; z-index: 1;
+      }
+      .ws-photo-remove {
+        position: absolute; top: 4px; right: 4px; width: 28px; height: 28px; padding: 0; border: none;
+        border-radius: 50%; background: rgba(0, 0, 0, 0.62); color: #fff; font-size: 18px; cursor: pointer; z-index: 2;
+        display: flex; align-items: center; justify-content: center;
+      }
+      .ws-photo-remove:hover { background: #b91c1c; }
+      .ws-photo-add-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+      .ws-photo-add-row input[type="url"] {
+        flex: 1; min-width: 200px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 0.88rem;
+      }
+      .ws-footer-bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 8px; }
+      code { font-size: 0.85em; background: #f3f4f6; padding: 1px 5px; border-radius: 4px; }
+      .mu-cat {
+        background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+        margin-bottom: 20px; overflow: hidden; box-shadow: var(--shadow);
+      }
+      .mu-cat-head {
+        padding: 14px 18px; border-bottom: 1px solid var(--border); background: #fafbfc;
+        display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+      }
+      .mu-cat-head h2 { margin: 0; font-size: 1rem; font-weight: 700; }
+      .mu-cat-head span { font-size: 0.8rem; color: var(--text-muted); }
+      .mu-grid {
+        display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; padding: 16px 18px;
+      }
+      .mu-tile {
+        border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: #f3f4f6;
+        aspect-ratio: 1; display: block; text-decoration: none; color: inherit;
+      }
+      .mu-tile img { width: 100%; height: 100%; object-fit: contain; display: block; }
+      .mu-tile-cap { font-size: 0.72rem; color: var(--text-muted); padding: 6px 8px; text-align: center; word-break: break-all; }
+      .mu-empty { padding: 28px; text-align: center; color: var(--text-muted); }
+    </style>
+    {% block extra_head %}{% endblock %}
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <a href="/" class="sidebar-brand">Etsy <span>Lab</span></a>
+        <a href="/" class="nav-item{% if (active_nav|default('workspace')) == 'workspace' %} active{% endif %}"><span>🖼</span> Görseller → Etsy</a>
+        <p style="padding: 8px 20px 0; margin: 0; font-size: 0.8rem; color: #8b909a; line-height: 1.45;">
+          {% block sidebar_hint %}Amazon’dan renk/varyant görselleri; Etsy’de yalnız fotoğraflı taslak.{% endblock %}
+        </p>
+      </aside>
+      <div class="main">
+        {% block topbar %}
+        <header class="topbar">
+          <div>
+            <h1>Etsy Lab</h1>
+            <div class="topbar-meta">{{ etsy_shop_name }}</div>
+          </div>
+        </header>
+        {% endblock %}
+        <div class="content{% block content_class %}{% endblock %}">
+          {% block content %}{% endblock %}
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
