@@ -5,9 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -22,10 +20,7 @@ from etsy_client import (
     update_listing_inventory,
     upload_listing_image_from_url,
 )
-from bs4 import BeautifulSoup
-
 from scraper import (
-    collect_listing_image_urls,
     parse_rendered_html,
     scrape_with_playwright,
     to_draft_dict,
@@ -54,69 +49,6 @@ def _validate_amazon_url(url: str) -> None:
     host = (p.netloc or "").lower()
     if "amazon." not in host:
         raise RuntimeError("Bu sürüm yalnızca Amazon ürün URL'leri için yapılandırıldı.")
-
-
-def _gallery_urls_for_asin(asin: str) -> list[str]:
-    try:
-        html = fetch_html_simple(f"https://www.amazon.com/dp/{asin}")
-        soup = BeautifulSoup(html, "lxml")
-        out: list[str] = []
-        for u in collect_listing_image_urls(soup, html):
-            if isinstance(u, str) and u.strip():
-                out.append(u.strip())
-        return out
-    except Exception:
-        return []
-
-
-def _augment_images_with_color_variants(
-    draft: dict[str, object],
-    *,
-    max_extra_asins: int = 0,
-    max_workers: int = 8,
-) -> None:
-    debug = draft.get("debug")
-    if not isinstance(debug, dict):
-        return
-    color_asin_map = debug.get("color_asin_map")
-    if not isinstance(color_asin_map, dict) or not color_asin_map:
-        return
-
-    images = draft.get("images")
-    if not isinstance(images, list):
-        images = []
-        draft["images"] = images
-
-    seen: set[str] = {str(x).strip() for x in images if isinstance(x, str) and str(x).strip()}
-    base_asin = ""
-    src = draft.get("source")
-    if isinstance(src, dict) and src.get("item_id"):
-        base_asin = str(src["item_id"]).strip().upper()
-
-    asins_ordered: list[str] = []
-    seen_asin: set[str] = set()
-    for _, asin in color_asin_map.items():
-        asin_s = str(asin).strip().upper()
-        if not re.fullmatch(r"[A-Z0-9]{10}", asin_s):
-            continue
-        if base_asin and asin_s == base_asin:
-            continue
-        if asin_s not in seen_asin:
-            seen_asin.add(asin_s)
-            asins_ordered.append(asin_s)
-
-    if max_extra_asins > 0:
-        asins_ordered = asins_ordered[:max_extra_asins]
-    if not asins_ordered:
-        return
-
-    with ThreadPoolExecutor(max_workers=min(max_workers, len(asins_ordered))) as pool:
-        futures = {pool.submit(_gallery_urls_for_asin, a): a for a in asins_ordered}
-        for fut in as_completed(futures):
-            for u in fut.result():
-                if u not in seen:
-                    images.append(u)
-                    seen.add(u)
 
 
 def _upload_images_best_effort(listing_id: int, images: list[str]) -> None:
@@ -225,7 +157,6 @@ def main() -> int:
         pass
     else:
         draft = to_draft_dict(listing)
-        _augment_images_with_color_variants(draft)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     if args.draft_json is None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
