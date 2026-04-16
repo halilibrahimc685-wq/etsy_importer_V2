@@ -159,12 +159,18 @@
             </form>
             <form id="form-generate-tags" method="post" action="/workspace/generate-tags"></form>
             <form id="form-generate-mockups" method="post" action="/workspace/generate-mockups" enctype="multipart/form-data"></form>
+            <div id="ws-lightbox" class="ws-lightbox" aria-hidden="true">
+              <img id="ws-lightbox-img" alt="Mockup preview" />
+            </div>
 
             <script type="application/json" id="draft-seed">{{ workspace_draft_json | safe }}</script>
             <script>
               (function () {
                 const seedEl = document.getElementById('draft-seed');
                 const PLACEHOLDER_IMG = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2280%22 height=%2280%22%3E%3Crect fill=%22%23e5e7eb%22 width=%2280%22 height=%2280%22/%3E%3C/svg%3E';
+                const lightboxEl = document.getElementById('ws-lightbox');
+                const lightboxImgEl = document.getElementById('ws-lightbox-img');
+                let lightboxUrl = '';
                 const SOURCE_AMAZON = 'amazon';
                 const SOURCE_MOCKUPS = 'mockups';
                 let activeSource = '{{ ws.active_source|default("amazon") }}';
@@ -187,6 +193,25 @@
                     return '/media/amazon-image?u=' + encodeURIComponent(u);
                   }
                   return u;
+                }
+                function wsCloseLightbox() {
+                  if (!lightboxEl) return;
+                  lightboxEl.classList.remove('is-open');
+                  lightboxEl.setAttribute('aria-hidden', 'true');
+                  lightboxUrl = '';
+                }
+                function wsOpenLightbox(rawUrl) {
+                  if (!lightboxEl || !lightboxImgEl) return;
+                  var display = wsDisplaySrc(rawUrl);
+                  if (!display) return;
+                  if (lightboxEl.classList.contains('is-open') && lightboxUrl === rawUrl) {
+                    wsCloseLightbox();
+                    return;
+                  }
+                  lightboxUrl = rawUrl;
+                  lightboxImgEl.src = display;
+                  lightboxEl.classList.add('is-open');
+                  lightboxEl.setAttribute('aria-hidden', 'false');
                 }
                 function wsReadSeed() {
                   try {
@@ -450,6 +475,22 @@
                     const tile = btn.closest('.ws-photo-tile');
                     if (tile) { tile.remove(); wsRefreshListingThumb(); wsUpdatePhotoCount(); }
                   });
+                });
+                if (mockupBox) {
+                  mockupBox.addEventListener('click', function (ev) {
+                    if (ev.target.closest('.ws-photo-remove')) return;
+                    const tile = ev.target.closest('.ws-photo-tile');
+                    if (!tile || !mockupBox.contains(tile)) return;
+                    const u = (tile.getAttribute('data-url') || '').trim();
+                    if (!u) return;
+                    wsOpenLightbox(u);
+                  });
+                }
+                if (lightboxEl) {
+                  lightboxEl.addEventListener('click', function () { wsCloseLightbox(); });
+                }
+                document.addEventListener('keydown', function (ev) {
+                  if (ev.key === 'Escape') wsCloseLightbox();
                 });
                 const addPhotoBtn = document.getElementById('ws_photo_add_btn');
                 const addPhotoInp = document.getElementById('ws_photo_add_url');

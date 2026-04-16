@@ -34,6 +34,7 @@ from amazon_scraper import canonical_amazon_dp_url, is_amazon_cdn_product_image_
 from mockup_engine import (
     MockupProcessingConfig,
     SUPPORTED_EXTENSIONS,
+    auto_fit_width_percent,
     calculate_luminance,
     collect_mockup_images,
     compose_mockup,
@@ -249,13 +250,20 @@ def _process_selected_mockups(
                 if lum < placement.luminance_threshold
                 else cfg.dark_design_path
             )
+            width_percent = auto_fit_width_percent(
+                placement.design_width_percent, design_to_use, cfg
+            )
             compose_mockup(
                 mockup_path=mockup,
                 selected_design_path=design_to_use,
                 output_path=out_path,
-                design_width_percent=placement.design_width_percent,
+                design_width_percent=width_percent,
                 design_y_offset_percent=placement.design_y_offset_percent,
                 design_x_offset_percent=placement.design_x_offset_percent,
+                print_area_left_px=placement.print_area_left_px,
+                print_area_right_px=placement.print_area_right_px,
+                print_area_top_px=placement.print_area_top_px,
+                print_area_bottom_px=placement.print_area_bottom_px,
             )
             out_paths.append(out_path)
             if log_callback:
@@ -265,22 +273,6 @@ def _process_selected_mockups(
             if log_callback:
                 log_callback(f"FAIL {mockup.name}: {exc}")
     return out_paths, failed
-
-
-async def _save_uploaded_design_file(upload: UploadFile, *, batch_id: str, role: str) -> Path:
-    filename = (upload.filename or "").strip()
-    ext = Path(filename).suffix.lower()
-    if ext not in SUPPORTED_EXTENSIONS:
-        raise RuntimeError(f"{role} design dosyası png/jpg/jpeg/webp olmalı.")
-    content = await upload.read()
-    if not content:
-        raise RuntimeError(f"{role} design dosyası boş.")
-    if len(content) > 20 * 1024 * 1024:
-        raise RuntimeError(f"{role} design dosyası çok büyük (max 20MB).")
-    WORKSPACE_DESIGNS_ROOT.mkdir(parents=True, exist_ok=True)
-    out = WORKSPACE_DESIGNS_ROOT / f"{batch_id}_{role}{ext}"
-    out.write_bytes(content)
-    return out
 
 
 async def _save_uploaded_design_file(upload: UploadFile, *, batch_id: str, role: str) -> Path:
@@ -790,7 +782,8 @@ def _workspace_ui(draft: Optional[dict[str, Any]]) -> dict[str, Any]:
     tags = [str(x).strip() for x in tags_raw] if isinstance(tags_raw, list) else []
     tags = [x for x in tags if x]
     return {
-        "has_draft": bool(amazon_images or mockup_images),
+        # Workspace paneli, görsel olmasa da draft varsa açık kalsın.
+        "has_draft": True,
         "images": current_images,
         "amazon_images": amazon_images,
         "mockup_images": mockup_images,

@@ -1,0 +1,48 @@
+{
+  "design_width_percent": 45,
+  "design_y_offset_percent": 40,
+  "design_x_offset_percent": 50,
+  "luminance_threshold": 145,
+  "templates": {
+    "CC T-shirt/5.png": {
+      "print_area_corners_px": {
+        "top_left": { "x": 649, "y": 303 },
+        "top_right": { "x": 1354, "y": 303 },
+        "bottom_right": { "x": 1354, "y": 1045 },
+        "bottom_left": { "x": 649, "y": 1045 }
+      }
+    },
+    "CC T-shirt/3.png": {
+      "print_area_corners_px": {
+        "top_left": { "x": 799, "y": 409 },
+        "top_right": { "x": 1249, "y": 409 },
+        "bottom_right": { "x": 1249, "y": 883 },
+        "bottom_left": { "x": 799, "y": 883 }
+      }
+    },
+    "CC T-shirt/39.png": {
+      "print_area_corners_px": {
+        "top_left": { "x": 799, "y": 435 },
+        "top_right": { "x": 1249, "y": 435 },
+        "bottom_right": { "x": 1249, "y": 909 },
+        "bottom_left": { "x": 799, "y": 909 }
+      }
+    },
+    "CC T-shirt/6.png": {
+      "print_area_corners_px": {
+        "top_left": { "x": 784, "y": 560 },
+        "top_right": { "x": 1264, "y": 560 },
+        "bottom_right": { "x": 1264, "y": 1065 },
+        "bottom_left": { "x": 784, "y": 1065 }
+      }
+    },
+    "CC T-shirt/9.png": {
+      "print_area_corners_px": {
+        "top_left": { "x": 853, "y": 371 },
+        "top_right": { "x": 1195, "y": 371 },
+        "bottom_right": { "x": 1195, "y": 730 },
+        "bottom_left": { "x": 853, "y": 730 }
+      }
+    }
+  }
+}

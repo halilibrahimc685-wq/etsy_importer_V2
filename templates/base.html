@@ -115,10 +115,10 @@
       .ws-label { font-size: 0.88rem; font-weight: 600; padding-top: 8px; }
       @media (max-width: 640px) { .ws-row { grid-template-columns: 1fr; } .ws-label { padding-top: 0; } }
       .ws-photo-editor {
-        display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; margin-bottom: 14px; touch-action: manipulation;
+        display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin-bottom: 14px; touch-action: manipulation;
       }
       .ws-photo-tile {
-        position: relative; width: 104px; height: 104px; flex-shrink: 0; border-radius: 8px;
+        position: relative; width: 158px; height: 158px; flex-shrink: 0; border-radius: 8px;
         overflow: hidden; border: 1px solid var(--border); background: #f3f4f6; cursor: grab; touch-action: manipulation;
       }
       .ws-photo-tile:active { cursor: grabbing; }
@@ -138,6 +138,15 @@
       .ws-photo-add-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
       .ws-photo-add-row input[type="url"] {
         flex: 1; min-width: 200px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 0.88rem;
+      }
+      .ws-lightbox {
+        position: fixed; inset: 0; background: rgba(0, 0, 0, 0.82); z-index: 9999;
+        display: none; align-items: center; justify-content: center; padding: 24px;
+      }
+      .ws-lightbox.is-open { display: flex; }
+      .ws-lightbox img {
+        max-width: 95vw; max-height: 92vh; object-fit: contain; border-radius: 10px; background: #111;
+        box-shadow: 0 16px 42px rgba(0,0,0,0.45);
       }
       .ws-footer-bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 8px; }
       code { font-size: 0.85em; background: #f3f4f6; padding: 1px 5px; border-radius: 4px; }
