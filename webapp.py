@@ -38,6 +38,7 @@ from mockup_engine import (
     calculate_luminance,
     collect_mockup_images,
     compose_mockup,
+    pick_design_for_mockup,
     process_all,
     resolve_placement,
 )
@@ -245,10 +246,8 @@ def _process_selected_mockups(
             placement = resolve_placement(cfg, mockup)
             with Image.open(mockup) as preview:
                 lum = calculate_luminance(preview)
-            design_to_use = (
-                cfg.light_design_path
-                if lum < placement.luminance_threshold
-                else cfg.dark_design_path
+            design_to_use = pick_design_for_mockup(
+                config=cfg, placement=placement, luminance=lum
             )
             width_percent = auto_fit_width_percent(
                 placement.design_width_percent, design_to_use, cfg

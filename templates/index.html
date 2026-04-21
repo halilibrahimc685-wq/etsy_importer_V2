@@ -111,13 +111,27 @@
                       </div>
                     </div>
                     <div class="hint" style="margin:8px 0;">Kütüphane: üretmek istediğin template'leri seç (mavi çerçeve).</div>
-                    <div class="mu-grid" style="padding:0;">
+                    <div id="ws-mockup-lib-tabs" style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 10px;">
                       {% for cat in mockup_categories %}
+                      <button
+                        type="button"
+                        class="btn btn-secondary ws-mockup-lib-tab{% if loop.first %} ws-mockup-lib-tab--active{% endif %}"
+                        data-category="{{ cat.title|e }}"
+                        style="padding:7px 11px;font-size:0.78rem;{% if loop.first %}background:var(--accent);color:#fff;border-color:var(--accent);{% endif %}"
+                      >
+                        {{ cat.title|e }}
+                      </button>
+                      {% endfor %}
+                    </div>
+                    <div id="ws-mockup-lib-panels">
+                      {% for cat in mockup_categories %}
+                      <div class="mu-grid ws-mockup-lib-panel" data-category="{{ cat.title|e }}" style="padding:0;{% if not loop.first %}display:none;{% endif %}">
                         {% for img in cat.images %}
                         <button type="button" class="mu-tile ws-mockup-pick" data-url="{{ img.url|e }}" title="{{ cat.title|e }} / {{ img.filename|e }}" style="padding:0;border:1px solid var(--border);cursor:pointer;">
                           <img src="{{ img.url|e }}" alt="{{ img.filename|e }}" loading="lazy" />
                         </button>
                         {% endfor %}
+                      </div>
                       {% endfor %}
                     </div>
                   </div>
@@ -518,6 +532,29 @@
                     }
                   });
                 });
+                (function wsInitMockupLibraryTabs() {
+                  const tabs = Array.from(document.querySelectorAll('.ws-mockup-lib-tab'));
+                  const panels = Array.from(document.querySelectorAll('.ws-mockup-lib-panel'));
+                  if (!tabs.length || !panels.length) return;
+                  function setActive(cat) {
+                    tabs.forEach(function (t) {
+                      const on = (t.getAttribute('data-category') || '') === cat;
+                      t.classList.toggle('ws-mockup-lib-tab--active', on);
+                      t.style.background = on ? 'var(--accent)' : '';
+                      t.style.color = on ? '#fff' : '';
+                      t.style.borderColor = on ? 'var(--accent)' : '';
+                    });
+                    panels.forEach(function (p) {
+                      const on = (p.getAttribute('data-category') || '') === cat;
+                      p.style.display = on ? 'grid' : 'none';
+                    });
+                  }
+                  tabs.forEach(function (t) {
+                    t.addEventListener('click', function () {
+                      setActive((t.getAttribute('data-category') || '').trim());
+                    });
+                  });
+                })();
                 const tabA = document.getElementById('ws-tab-amazon');
                 const tabM = document.getElementById('ws-tab-mockups');
                 if (tabA) tabA.addEventListener('click', function(){ wsSwitchTab(SOURCE_AMAZON); });

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from PIL import Image, ImageStat
 
@@ -14,6 +14,9 @@ _SUPER_TALL_MIN_EXTRA_SCALE = 0.55
 # Genis-kisa tasarimlar optik olarak biraz asagida gorunebilir; hafif yukari kaydir.
 _WIDE_SHORT_RATIO_THRESHOLD = 2.2
 _WIDE_SHORT_Y_LIFT_FROM_FREE_SPACE = 0.08
+# print_area kutusu varken: onceki (mh - th) * y% formulu kisa tasarimlarda kutunun altina yakinlastiriyordu.
+# Dikey konum: kutunun UST kenarina yasla (0), ortala (0.5), alta yaklastir (1).
+_PRINT_BOX_VERTICAL_ALIGN_FRAC = 0.0
 
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
@@ -57,6 +60,7 @@ class ResolvedPlacement:
     print_area_right_px: Optional[float] = None
     print_area_top_px: Optional[float] = None
     print_area_bottom_px: Optional[float] = None
+    force_design: Optional[str] = None
 
 
 def calculate_luminance(image: Image.Image) -> float:
@@ -128,7 +132,7 @@ def _placement_from_corners(
     }
 
 
-def _read_root_template_placement(root_cfg: Path, root: Path, mockup_path: Path) -> dict[str, float]:
+def _read_root_template_placement(root_cfg: Path, root: Path, mockup_path: Path) -> dict[str, Any]:
     if not root_cfg.is_file():
         return {}
     try:
@@ -155,10 +159,14 @@ def _read_root_template_placement(root_cfg: Path, root: Path, mockup_path: Path)
             mw, mh = im.size
     except Exception:
         return {}
-    return _placement_from_corners(corners, mw, mh)
+    out: dict[str, Any] = _placement_from_corners(corners, mw, mh)
+    design_raw = str(node.get("design") or "").strip().lower()
+    if design_raw in {"white", "black"}:
+        out["_force_design"] = design_raw
+    return out
 
 
-def _merge_placement(base: dict[str, float], overlay: dict[str, float]) -> dict[str, float]:
+def _merge_placement(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base)
     merged.update(overlay)
     return merged
@@ -174,7 +182,7 @@ def resolve_placement(config: MockupProcessingConfig, mockup_path: Path) -> Reso
     """
     root = config.mockups_root.resolve()
     mp = mockup_path.resolve()
-    merged: dict[str, float] = {
+    merged: dict[str, Any] = {
         "design_width_percent": float(config.design_width_percent),
         "design_y_offset_percent": float(config.design_y_offset_percent),
         "design_x_offset_percent": float(config.design_x_offset_percent),
@@ -204,6 +212,25 @@ def resolve_placement(config: MockupProcessingConfig, mockup_path: Path) -> Reso
         print_area_right_px=merged.get("_print_area_right_px"),
         print_area_top_px=merged.get("_print_area_top_px"),
         print_area_bottom_px=merged.get("_print_area_bottom_px"),
+        force_design=str(merged.get("_force_design") or "").strip().lower() or None,
+    )
+
+
+def pick_design_for_mockup(
+    *,
+    config: MockupProcessingConfig,
+    placement: ResolvedPlacement,
+    luminance: float,
+) -> Path:
+    forced = (placement.force_design or "").strip().lower()
+    if forced == "white":
+        return config.light_design_path
+    if forced == "black":
+        return config.dark_design_path
+    return (
+        config.light_design_path
+        if luminance < placement.luminance_threshold
+        else config.dark_design_path
     )
 
 
@@ -362,6 +389,10 @@ def compose_mockup(
                 else:
                     x = left
                 if max_y >= top:
+                    slack_y = float(max_y - top)
+                    y = top + int(
+                        round(slack_y * float(_PRINT_BOX_VERTICAL_ALIGN_FRAC))
+                    )
                     y = max(top, min(y, max_y))
                 else:
                     y = top
@@ -404,10 +435,8 @@ def process_all(
             placement = resolve_placement(config, mockup)
             with Image.open(mockup) as preview:
                 lum = calculate_luminance(preview)
-            design_to_use = (
-                config.light_design_path
-                if lum < placement.luminance_threshold
-                else config.dark_design_path
+            design_to_use = pick_design_for_mockup(
+                config=config, placement=placement, luminance=lum
             )
             width_percent = auto_fit_width_percent(
                 placement.design_width_percent, design_to_use, config
