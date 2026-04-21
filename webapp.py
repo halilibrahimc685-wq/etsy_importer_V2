@@ -298,6 +298,36 @@ def _list_mockup_catalog() -> list[dict[str, Any]]:
     return categories
 
 
+def _on_vercel() -> bool:
+    return bool((os.environ.get("VERCEL") or "").strip())
+
+
+def _mockup_library_empty_note(categories: list[dict[str, Any]]) -> Optional[str]:
+    """Katalog boşken kullanıcıya nedenini anlat (özellikle Vercel + .vercelignore)."""
+    if categories:
+        return None
+    if _on_vercel() and not _r2_enabled():
+        return (
+            "Vercel: büyük mockup görselleri bu deploy paketine alınmaz "
+            "(.vercelignore — sadece Mockups/placement.json gelir). Bu yüzden klasör “bulunur” "
+            "görünse de şablon PNG’leri yoktur. Kütüphane ve üretim için Vercel ortam değişkenlerinde "
+            "S3_* (Cloudflare R2) tanımlayıp görselleri bucket’a yükleyin; uygulama o zaman R2’den listeler. "
+            "Yerel bilgisayarda çalıştırırken tam Mockups klasörü kullanılabilir."
+        )
+    if _r2_enabled():
+        return (
+            "R2 (S3_*) tanımlı ama katalog boş. Bucket’ta dosya var mı, S3_PREFIX doğru mu kontrol edin. "
+            "Bir ağ/kimlik hatası Vercel Runtime log’larına düşmüş olabilir."
+        )
+    root = _mockups_root()
+    if not root.is_dir():
+        return f"Mockups klasörü yok: {root} — yolu kontrol edin."
+    return (
+        f"Katalog boş. {root} altında kategori adlarında alt klasörlere .png / .jpg / .webp template "
+        "görselleri koyun."
+    )
+
+
 def _is_mockup_media_url(u: str) -> bool:
     return u.startswith("/media/mockups/") or u.startswith("/media/workspace-mockups/")
 
@@ -1126,6 +1156,7 @@ def _render_index(
     else:
         workspace_draft_json = _json_for_html_script_embed(workspace_draft_json)
     ws = _workspace_ui(workspace_draft)
+    mockup_categories = _list_mockup_catalog()
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -1142,7 +1173,8 @@ def _render_index(
             "workspace_listing_id": workspace_listing_id,
             "etsy_shop_name": etsy_shop_name,
             "ws": ws,
-            "mockup_categories": _list_mockup_catalog(),
+            "mockup_categories": mockup_categories,
+            "mockup_library_note": _mockup_library_empty_note(mockup_categories),
         },
     )
 
@@ -1200,6 +1232,7 @@ def studio_page(
         batch_dir = _latest_workspace_batch_dir()
     generated_urls = _workspace_urls_for_batch(batch_dir) if batch_dir else []
     mockups_root = _mockups_root()
+    mockup_categories = _list_mockup_catalog()
     return templates.TemplateResponse(
         request,
         "studio.html",
@@ -1209,7 +1242,8 @@ def studio_page(
             "status": status.strip() or None,
             "warning": warning.strip() or None,
             "error": error.strip() or None,
-            "mockup_categories": _list_mockup_catalog(),
+            "mockup_categories": mockup_categories,
+            "mockup_library_note": _mockup_library_empty_note(mockup_categories),
             "mockups_root_path": str(mockups_root),
             "mockups_root_exists": mockups_root.is_dir(),
             "generated_urls": generated_urls,
@@ -1282,8 +1316,16 @@ def studio_set_mockups_dir(mockups_dir: str = Form("")) -> HTMLResponse:
     if not resolved.is_dir():
         msg = quote(f"Mockups klasoru bulunamadi: {resolved}")
         return RedirectResponse(url=f"/studio?warning={msg}", status_code=303)
-    msg = quote(f"Mockups klasoru guncellendi: {resolved}")
-    return RedirectResponse(url=f"/studio?status={msg}", status_code=303)
+    status_msg = quote(f"Mockups klasoru guncellendi: {resolved}")
+    if _on_vercel() and not _r2_enabled():
+        w = quote(
+            "Vercel: disk üzerinde büyük mockup görselleri yok; kütüphane için S3_*(R2) gerekir. "
+            "Bu sadece placement.json yoludur, şablon PNG’lerini bekleme."
+        )
+        return RedirectResponse(
+            url=f"/studio?status={status_msg}&warning={w}", status_code=303
+        )
+    return RedirectResponse(url=f"/studio?status={status_msg}", status_code=303)
 
 
 @app.post("/studio/generate-mockups", response_class=HTMLResponse)

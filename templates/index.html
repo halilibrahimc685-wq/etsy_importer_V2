@@ -111,6 +111,9 @@
                       </div>
                     </div>
                     <div class="hint" style="margin:8px 0;">Kütüphane: üretmek istediğin template'leri seç (mavi çerçeve).</div>
+                    {% if mockup_library_note %}
+                    <div class="alert alert-warning" style="margin:6px 0 10px;"><strong>Mockup kütüphanesi boş.</strong> {{ mockup_library_note|e }}</div>
+                    {% endif %}
                     <div id="ws-mockup-lib-tabs" style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 10px;">
                       {% for cat in mockup_categories %}
                       <button

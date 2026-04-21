@@ -12,6 +12,9 @@
 {% if error %}<div class="alert alert-error"><strong>Hata.</strong> {{ error }}</div>{% endif %}
 {% if status %}<div class="alert alert-success"><strong>Tamam.</strong> {{ status }}</div>{% endif %}
 {% if warning %}<div class="alert alert-warning"><strong>Uyarı.</strong> {{ warning }}</div>{% endif %}
+{% if mockup_library_note %}
+<div class="alert alert-warning" style="margin:10px 0 14px;"><strong>Mockup kütüphanesi boş.</strong> {{ mockup_library_note|e }}</div>
+{% endif %}
 
 <div class="ws-page">
   <p class="hint" style="margin-bottom:16px;">Design dosyalarını yükle, kütüphaneden template seç, mockup üret ve bilgisayarına indir.</p>
