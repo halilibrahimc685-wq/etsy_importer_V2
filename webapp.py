@@ -4,6 +4,7 @@ import copy
 import io
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import re
 import time
@@ -109,6 +110,8 @@ WORKSPACE_MOCKUPS_ROOT = _DRAFTS_BASE / "mockups_generated" / "_workspace"
 WORKSPACE_DESIGNS_ROOT = _DRAFTS_BASE / "_workspace_designs"
 _ETSY_TAG_MAX_LEN = 20
 _ETSY_TAG_MAX_COUNT = 13
+# Şablon / üretilmiş mockup görselleri: tarayıcı ve CDN kenarında önbellek (tekrar ziyaret hızlanır).
+_MOCKUP_IMAGE_CACHE_CONTROL = "public, max-age=604800, stale-while-revalidate=86400"
 
 
 def _r2_enabled() -> bool:
@@ -430,8 +433,8 @@ def _r2_mirror_workspace_batch(batch_id: str, batch_dir: Path) -> None:
     if not bucket or not batch_dir.is_dir():
         return
     prefix = _r2_workspace_batch_s3_prefix(batch_id)
-    client = _r2_client()
     batch_resolved = batch_dir.resolve()
+    tasks: list[tuple[str, str]] = []
     for p in sorted(batch_resolved.rglob("*")):
         if not p.is_file():
             continue
@@ -442,12 +445,28 @@ def _r2_mirror_workspace_batch(batch_id: str, batch_dir: Path) -> None:
         except ValueError:
             continue
         key = f"{prefix}{rel}".replace("\\", "/")
+        tasks.append((str(p), key))
+
+    def _one(t: tuple[str, str]) -> None:
+        lp, ky = t
         try:
-            client.upload_file(str(p), bucket, key)
+            _r2_client().upload_file(lp, bucket, ky)
         except Exception:
             logging.getLogger("uvicorn.error").exception(
-                "R2 workspace mirror upload basarisiz bucket=%s key=%s", bucket, key
+                "R2 workspace mirror upload basarisiz bucket=%s key=%s", bucket, ky
             )
+
+    if not tasks:
+        return
+    workers = min(10, max(1, len(tasks)))
+    if workers == 1:
+        for t in tasks:
+            _one(t)
+        return
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_one, t) for t in tasks]
+        for f in as_completed(futures):
+            f.result()
 
 
 def _r2_remote_workspace_batch_has_objects(batch_id: str) -> bool:
@@ -1479,8 +1498,13 @@ def mockup_media(path: str) -> FileResponse:
             )
             raise HTTPException(status_code=404, detail="Mockup bulunamadı")
         ct = media.get(ext, "application/octet-stream")
-        return Response(content=data, media_type=ct)
-    p = _safe_mockup_file_path(path)
+        return Response(
+            content=data,
+            media_type=ct,
+            headers={"Cache-Control": _MOCKUP_IMAGE_CACHE_CONTROL},
+        )
+    rel_local = unquote((path or "").strip().replace("\\", "/")).lstrip("/")
+    p = _safe_mockup_file_path(rel_local)
     if not p:
         raise HTTPException(status_code=404, detail="Mockup bulunamadı")
     media = {
@@ -1490,7 +1514,12 @@ def mockup_media(path: str) -> FileResponse:
         ".webp": "image/webp",
     }
     ct = media.get(p.suffix.lower(), "application/octet-stream")
-    return FileResponse(p, media_type=ct, filename=p.name)
+    return FileResponse(
+        p,
+        media_type=ct,
+        filename=p.name,
+        headers={"Cache-Control": _MOCKUP_IMAGE_CACHE_CONTROL},
+    )
 
 
 @app.get("/media/workspace-mockups/{path:path}")
@@ -1506,7 +1535,12 @@ def workspace_mockup_media(path: str) -> FileResponse:
         ".webp": "image/webp",
     }
     ct = media.get(p.suffix.lower(), "application/octet-stream")
-    return FileResponse(p, media_type=ct, filename=p.name)
+    return FileResponse(
+        p,
+        media_type=ct,
+        filename=p.name,
+        headers={"Cache-Control": _MOCKUP_IMAGE_CACHE_CONTROL},
+    )
 
 
 @app.get("/media/workspace-r2/{batch_id}/{path:path}")
@@ -1540,7 +1574,11 @@ def workspace_r2_mockup_media(batch_id: str, path: str) -> Response:
         )
         raise HTTPException(status_code=404, detail="Workspace mockup bulunamadı")
     ct = media.get(ext, "application/octet-stream")
-    return Response(content=data, media_type=ct)
+    return Response(
+        content=data,
+        media_type=ct,
+        headers={"Cache-Control": _MOCKUP_IMAGE_CACHE_CONTROL},
+    )
 
 
 @app.post("/studio/set-mockups-dir", response_class=HTMLResponse)
