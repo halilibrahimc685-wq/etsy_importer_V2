@@ -135,8 +135,14 @@ def _r2_rel_from_key(key: str) -> str:
     return key.lstrip("/")
 
 
+def _r2_endpoint_url() -> str:
+    """Cloudflare dokümantasyonundan <account_id> köşeli parantezleri kopyalanmissa temizle."""
+    raw = (os.environ.get("S3_ENDPOINT") or "").strip()
+    return raw.replace("<", "").replace(">", "").strip()
+
+
 def _r2_client():
-    endpoint = (os.environ.get("S3_ENDPOINT") or "").strip()
+    endpoint = _r2_endpoint_url()
     region = (os.environ.get("S3_REGION") or "auto").strip() or "auto"
     return boto3.client(
         "s3",
