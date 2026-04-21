@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import copy
+import io
 import json
 import logging
 import os
 import re
 import time
 import urllib.request
+import zipfile
 from datetime import datetime, timezone
 from uuid import uuid4
 from pathlib import Path
@@ -14,6 +16,7 @@ from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import quote, unquote, urlparse
 
 import httpx
+import boto3
 from PIL import Image
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -97,6 +100,74 @@ _ETSY_TAG_MAX_LEN = 20
 _ETSY_TAG_MAX_COUNT = 13
 
 
+def _r2_enabled() -> bool:
+    return all(
+        (os.environ.get(k) or "").strip()
+        for k in ("S3_BUCKET", "S3_ENDPOINT", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY")
+    )
+
+
+def _r2_prefix() -> str:
+    raw = str(os.environ.get("S3_PREFIX") or "").strip().strip("/")
+    return (raw + "/") if raw else ""
+
+
+def _r2_key_for_rel(rel: str) -> str:
+    rel_norm = str(rel or "").strip().replace("\\", "/").lstrip("/")
+    return f"{_r2_prefix()}{rel_norm}"
+
+
+def _r2_rel_from_key(key: str) -> str:
+    prefix = _r2_prefix()
+    if prefix and key.startswith(prefix):
+        return key[len(prefix) :].lstrip("/")
+    return key.lstrip("/")
+
+
+def _r2_client():
+    endpoint = (os.environ.get("S3_ENDPOINT") or "").strip()
+    region = (os.environ.get("S3_REGION") or "auto").strip() or "auto"
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        region_name=region,
+        aws_access_key_id=(os.environ.get("S3_ACCESS_KEY_ID") or "").strip(),
+        aws_secret_access_key=(os.environ.get("S3_SECRET_ACCESS_KEY") or "").strip(),
+    )
+
+
+def _r2_list_keys() -> list[str]:
+    bucket = (os.environ.get("S3_BUCKET") or "").strip()
+    if not bucket:
+        return []
+    client = _r2_client()
+    prefix = _r2_prefix()
+    keys: list[str] = []
+    token: Optional[str] = None
+    while True:
+        kw: dict[str, Any] = {"Bucket": bucket, "Prefix": prefix, "MaxKeys": 1000}
+        if token:
+            kw["ContinuationToken"] = token
+        resp = client.list_objects_v2(**kw)
+        for obj in (resp.get("Contents") or []):
+            k = str(obj.get("Key") or "")
+            if not k:
+                continue
+            rel = _r2_rel_from_key(k)
+            if not rel or rel.endswith("/"):
+                continue
+            ext = Path(rel).suffix.lower()
+            if ext not in SUPPORTED_EXTENSIONS:
+                continue
+            keys.append(rel)
+        if not resp.get("IsTruncated"):
+            break
+        token = str(resp.get("NextContinuationToken") or "")
+        if not token:
+            break
+    return sorted(keys, key=lambda s: s.lower())
+
+
 def _mockups_root() -> Path:
     raw = (os.environ.get("MOCKUPS_DIR") or "").strip()
     if raw:
@@ -130,6 +201,39 @@ def _safe_mockup_file_path(rel: str) -> Optional[Path]:
 
 
 def _list_mockup_catalog() -> list[dict[str, Any]]:
+    if _r2_enabled():
+        keys = _r2_list_keys()
+        groups: dict[str, list[str]] = {}
+        for rel in keys:
+            parts = [p for p in rel.split("/") if p]
+            if not parts:
+                continue
+            if len(parts) == 1:
+                title = "Files"
+                filename = parts[0]
+            else:
+                title = parts[0]
+                filename = parts[-1]
+            groups.setdefault(title, []).append(rel)
+        categories: list[dict[str, Any]] = []
+        for title in sorted(groups.keys(), key=lambda s: s.lower()):
+            rels_sorted = sorted(groups[title], key=lambda s: s.lower())
+            images = [
+                {"rel": rel, "filename": Path(rel).name, "url": _mockup_rel_url(rel)}
+                for rel in rels_sorted
+            ]
+            if not images:
+                continue
+            categories.append(
+                {
+                    "id": title,
+                    "title": title,
+                    "count": len(images),
+                    "cover_rel": images[0]["rel"],
+                    "images": images,
+                }
+            )
+        return categories
     root = _mockups_root()
     if not root.is_dir():
         return []
@@ -206,6 +310,39 @@ def _safe_workspace_mockup_file_path(rel: str) -> Optional[Path]:
     return candidate
 
 
+def _latest_workspace_batch_dir() -> Optional[Path]:
+    root = WORKSPACE_MOCKUPS_ROOT.resolve()
+    if not root.is_dir():
+        return None
+    dirs = [p for p in root.iterdir() if p.is_dir()]
+    if not dirs:
+        return None
+    return max(dirs, key=lambda p: p.stat().st_mtime)
+
+
+def _workspace_urls_for_batch(batch: Path) -> list[str]:
+    urls: list[str] = []
+    for p in sorted(batch.rglob("*")):
+        if not p.is_file() or p.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            continue
+        try:
+            rel = p.resolve().relative_to(WORKSPACE_MOCKUPS_ROOT.resolve()).as_posix()
+        except ValueError:
+            continue
+        urls.append(_workspace_mockup_rel_url(rel))
+    return urls
+
+
+def _workspace_path_from_media_url(url: str) -> Optional[Path]:
+    u = str(url or "").strip()
+    if not u.startswith("/media/workspace-mockups/"):
+        return None
+    rel = unquote(u[len("/media/workspace-mockups/") :]).strip().replace("\\", "/")
+    if not rel or ".." in rel.split("/"):
+        return None
+    return _safe_workspace_mockup_file_path(rel)
+
+
 def _template_paths_from_urls(urls: list[str], root: Path) -> list[Path]:
     out: list[Path] = []
     seen: set[str] = set()
@@ -228,6 +365,41 @@ def _template_paths_from_urls(urls: list[str], root: Path) -> list[Path]:
             continue
         seen.add(key)
         out.append(p)
+    return out
+
+
+def _template_rels_from_urls(urls: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in urls:
+        u = str(raw or "").strip()
+        if not u.startswith("/media/mockups/"):
+            continue
+        rel = unquote(u[len("/media/mockups/") :]).strip().replace("\\", "/")
+        if not rel or ".." in rel.split("/"):
+            continue
+        if rel in seen:
+            continue
+        seen.add(rel)
+        out.append(rel)
+    return out
+
+
+def _download_r2_templates(temp_root: Path, rels: list[str]) -> list[Path]:
+    bucket = (os.environ.get("S3_BUCKET") or "").strip()
+    if not bucket:
+        return []
+    client = _r2_client()
+    out: list[Path] = []
+    for rel in rels:
+        ext = Path(rel).suffix.lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            continue
+        target = (temp_root / rel).resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        key = _r2_key_for_rel(rel)
+        client.download_file(bucket, key, str(target))
+        out.append(target)
     return out
 
 
@@ -991,8 +1163,70 @@ def index(request: Request) -> HTMLResponse:
     return _render_index(request)
 
 
+@app.get("/studio", response_class=HTMLResponse)
+def studio_page(
+    request: Request,
+    status: str = Query(""),
+    warning: str = Query(""),
+    error: str = Query(""),
+    batch: str = Query(""),
+) -> HTMLResponse:
+    batch_dir: Optional[Path] = None
+    if batch.strip():
+        cand = (WORKSPACE_MOCKUPS_ROOT / batch.strip()).resolve()
+        try:
+            cand.relative_to(WORKSPACE_MOCKUPS_ROOT.resolve())
+            if cand.is_dir():
+                batch_dir = cand
+        except ValueError:
+            batch_dir = None
+    if batch_dir is None:
+        batch_dir = _latest_workspace_batch_dir()
+    generated_urls = _workspace_urls_for_batch(batch_dir) if batch_dir else []
+    mockups_root = _mockups_root()
+    return templates.TemplateResponse(
+        request,
+        "studio.html",
+        {
+            "request": request,
+            "active_nav": "studio",
+            "status": status.strip() or None,
+            "warning": warning.strip() or None,
+            "error": error.strip() or None,
+            "mockup_categories": _list_mockup_catalog(),
+            "mockups_root_path": str(mockups_root),
+            "mockups_root_exists": mockups_root.is_dir(),
+            "generated_urls": generated_urls,
+            "current_batch": batch_dir.name if batch_dir else "",
+            "etsy_shop_name": _etsy_shop_display_name(),
+        },
+    )
+
+
 @app.get("/media/mockups/{path:path}")
 def mockup_media(path: str) -> FileResponse:
+    if _r2_enabled():
+        rel = (path or "").strip().replace("\\", "/")
+        if not rel or ".." in rel.split("/"):
+            raise HTTPException(status_code=404, detail="Mockup bulunamadı")
+        ext = Path(rel).suffix.lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            raise HTTPException(status_code=404, detail="Mockup bulunamadı")
+        key = _r2_key_for_rel(rel)
+        bucket = (os.environ.get("S3_BUCKET") or "").strip()
+        media = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+        }
+        try:
+            resp = _r2_client().get_object(Bucket=bucket, Key=key)
+            data = resp["Body"].read()
+        except Exception:
+            raise HTTPException(status_code=404, detail="Mockup bulunamadı")
+        ct = media.get(ext, "application/octet-stream")
+        return Response(content=data, media_type=ct)
     p = _safe_mockup_file_path(path)
     if not p:
         raise HTTPException(status_code=404, detail="Mockup bulunamadı")
@@ -1019,6 +1253,136 @@ def workspace_mockup_media(path: str) -> FileResponse:
     }
     ct = media.get(p.suffix.lower(), "application/octet-stream")
     return FileResponse(p, media_type=ct, filename=p.name)
+
+
+@app.post("/studio/set-mockups-dir", response_class=HTMLResponse)
+def studio_set_mockups_dir(mockups_dir: str = Form("")) -> HTMLResponse:
+    cleaned = (mockups_dir or "").strip()
+    if not cleaned:
+        os.environ.pop("MOCKUPS_DIR", None)
+        return RedirectResponse(url="/studio?status=Mockups%20klasoru%20varsayilana%20alindi.", status_code=303)
+    resolved = Path(cleaned).expanduser().resolve()
+    os.environ["MOCKUPS_DIR"] = str(resolved)
+    if not resolved.is_dir():
+        msg = quote(f"Mockups klasoru bulunamadi: {resolved}")
+        return RedirectResponse(url=f"/studio?warning={msg}", status_code=303)
+    msg = quote(f"Mockups klasoru guncellendi: {resolved}")
+    return RedirectResponse(url=f"/studio?status={msg}", status_code=303)
+
+
+@app.post("/studio/generate-mockups", response_class=HTMLResponse)
+async def studio_generate_mockups(
+    design_white_file: UploadFile = File(...),
+    design_black_file: UploadFile = File(...),
+    selected_template_urls: str = Form("[]"),
+) -> HTMLResponse:
+    try:
+        r2_mode = _r2_enabled()
+        root = _mockups_root()
+        if not r2_mode and not root.is_dir():
+            raise RuntimeError(f"Mockups klasoru bulunamadi: {root}")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        batch_id = f"studio_{stamp}_{uuid4().hex[:8]}"
+        white_design_path = await _save_uploaded_design_file(
+            design_white_file, batch_id=batch_id, role="white"
+        )
+        black_design_path = await _save_uploaded_design_file(
+            design_black_file, batch_id=batch_id, role="black"
+        )
+        out_root = (WORKSPACE_MOCKUPS_ROOT / batch_id).resolve()
+        run_root = root
+        if r2_mode:
+            run_root = (WORKSPACE_DESIGNS_ROOT / f"{batch_id}_mockups_src").resolve()
+            run_root.mkdir(parents=True, exist_ok=True)
+        cfg = MockupProcessingConfig(
+            mockups_root=run_root,
+            dark_design_path=black_design_path,
+            light_design_path=white_design_path,
+            output_root=out_root,
+        )
+        selected_raw: list[str] = []
+        try:
+            p = json.loads(selected_template_urls or "[]")
+            if isinstance(p, list):
+                selected_raw = [str(x).strip() for x in p if isinstance(x, str) and str(x).strip()]
+        except Exception:
+            selected_raw = []
+        if r2_mode:
+            selected_rels = _template_rels_from_urls(selected_raw)
+            if not selected_rels:
+                raise RuntimeError("R2 modunda en az bir template secilmelidir.")
+            selected_paths = _download_r2_templates(run_root, selected_rels)
+        else:
+            selected_paths = _template_paths_from_urls(selected_raw, root)
+        if selected_raw and not selected_paths:
+            raise RuntimeError("Secilen template'ler gecersiz veya bulunamadi.")
+        if selected_paths:
+            out_paths, failed = _process_selected_mockups(cfg, selected_paths)
+        else:
+            out_paths, failed = process_all(cfg)
+        if not out_paths:
+            raise RuntimeError("Mockup uretilemedi.")
+        status = quote(f"{len(out_paths)} mockup uretildi." + (f" {failed} dosya basarisiz." if failed else ""))
+        return RedirectResponse(url=f"/studio?status={status}&batch={quote(batch_id)}", status_code=303)
+    except Exception as exc:
+        return RedirectResponse(url=f"/studio?warning={quote(str(exc))}", status_code=303)
+
+
+@app.get("/studio/download-latest-mockups")
+def studio_download_latest_mockups() -> Response:
+    batch = _latest_workspace_batch_dir()
+    if not batch:
+        raise HTTPException(status_code=404, detail="Indirilecek mockup batch bulunamadi.")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for p in sorted(batch.rglob("*")):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(batch).as_posix()
+            zf.write(p, arcname=rel)
+    headers = {
+        "Content-Disposition": f'attachment; filename="{batch.name}.zip"',
+        "Cache-Control": "no-store",
+    }
+    return Response(content=buf.getvalue(), media_type="application/zip", headers=headers)
+
+
+@app.post("/studio/download-selected-mockups")
+def studio_download_selected_mockups(selected_urls: str = Form("[]")) -> Response:
+    try:
+        raw = json.loads(selected_urls or "[]")
+    except Exception:
+        raw = []
+    if not isinstance(raw, list):
+        raw = []
+    files: list[Path] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        p = _workspace_path_from_media_url(item)
+        if not p:
+            continue
+        key = str(p.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        files.append(p)
+    if not files:
+        raise HTTPException(status_code=400, detail="Indirilecek secili mockup bulunamadi.")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for p in files:
+            try:
+                rel = p.resolve().relative_to(WORKSPACE_MOCKUPS_ROOT.resolve()).as_posix()
+            except ValueError:
+                rel = p.name
+            zf.write(p, arcname=rel)
+    headers = {
+        "Content-Disposition": 'attachment; filename="selected_mockups.zip"',
+        "Cache-Control": "no-store",
+    }
+    return Response(content=buf.getvalue(), media_type="application/zip", headers=headers)
 
 
 @app.get("/media/amazon-image")
@@ -1216,8 +1580,9 @@ async def workspace_generate_mockups(
     except Exception:
         draft = {}
     try:
+        r2_mode = _r2_enabled()
         root = _mockups_root()
-        if not root.is_dir():
+        if not r2_mode and not root.is_dir():
             raise RuntimeError(f"Mockups klasörü bulunamadı: {root}")
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1233,8 +1598,12 @@ async def workspace_generate_mockups(
         )
 
         out_root = (WORKSPACE_MOCKUPS_ROOT / batch_id).resolve()
+        run_root = root
+        if r2_mode:
+            run_root = (WORKSPACE_DESIGNS_ROOT / f"{batch_id}_mockups_src").resolve()
+            run_root.mkdir(parents=True, exist_ok=True)
         cfg = MockupProcessingConfig(
-            mockups_root=root,
+            mockups_root=run_root,
             dark_design_path=black_design_path,
             light_design_path=white_design_path,
             output_root=out_root,
@@ -1246,13 +1615,16 @@ async def workspace_generate_mockups(
                 selected_raw = [str(x).strip() for x in p if isinstance(x, str) and str(x).strip()]
         except Exception:
             selected_raw = []
-        selected_paths = _template_paths_from_urls(selected_raw, root)
+        if r2_mode:
+            selected_rels = _template_rels_from_urls(selected_raw)
+            if not selected_rels:
+                raise RuntimeError("R2 modunda en az bir template secilmelidir.")
+            selected_paths = _download_r2_templates(run_root, selected_rels)
+        else:
+            selected_paths = _template_paths_from_urls(selected_raw, root)
         if selected_raw and not selected_paths:
             raise RuntimeError("Secilen template'ler gecersiz veya bulunamadi.")
-        if selected_paths:
-            out_paths, failed = _process_selected_mockups(cfg, selected_paths)
-        else:
-            out_paths, failed = process_all(cfg)
+        out_paths, failed = _process_selected_mockups(cfg, selected_paths) if selected_paths else process_all(cfg)
         if not out_paths:
             raise RuntimeError("Mockup üretilemedi. Mockups klasörünü ve design dosyasını kontrol edin.")
         urls: list[str] = []

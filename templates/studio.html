@@ -1,0 +1,329 @@
+{% extends "base.html" %}
+{% block title %}Etsy Lab — Mockup Studio{% endblock %}
+{% block topbar %}
+<header class="topbar">
+  <div>
+    <h1>Mockup Studio</h1>
+    <div class="topbar-meta">{{ etsy_shop_name }} · Amazon/Etsy'den bagimsiz mockup uretim ve indirme.</div>
+  </div>
+</header>
+{% endblock %}
+{% block content %}
+{% if error %}<div class="alert alert-error"><strong>Hata.</strong> {{ error }}</div>{% endif %}
+{% if status %}<div class="alert alert-success"><strong>Tamam.</strong> {{ status }}</div>{% endif %}
+{% if warning %}<div class="alert alert-warning"><strong>Uyarı.</strong> {{ warning }}</div>{% endif %}
+
+<div class="ws-page">
+  <p class="hint" style="margin-bottom:16px;">Design dosyalarını yükle, kütüphaneden template seç, mockup üret ve bilgisayarına indir.</p>
+
+  <div class="ws-section">
+    <div class="ws-section-head">Mockup Studio</div>
+    <div class="ws-section-body">
+      <form method="post" action="/studio/set-mockups-dir" style="margin:8px 0 10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <input
+          type="text"
+          name="mockups_dir"
+          value="{{ mockups_root_path|e }}"
+          placeholder="/Users/.../Mockups"
+          style="min-width:320px;flex:1;padding:8px 10px;border-radius:8px;border:1px solid var(--border);"
+        />
+        <button type="submit" class="btn btn-secondary">Klasoru uygula</button>
+      </form>
+      <p class="hint" style="margin:0 0 10px;">
+        Aktif Mockups klasoru: <code>{{ mockups_root_path|e }}</code>
+        {% if mockups_root_exists %}(bulundu){% else %}(bulunamadi){% endif %}
+      </p>
+
+      <div class="ws-photo-add-row">
+        <input type="file" name="design_white_file" id="st_design_white_file" accept=".png,.jpg,.jpeg,.webp" form="form-studio-generate" style="display:none;" />
+        <input type="file" name="design_black_file" id="st_design_black_file" accept=".png,.jpg,.jpeg,.webp" form="form-studio-generate" style="display:none;" />
+        <div id="st_drop_white" class="mu-tile" style="min-width:220px;max-width:260px;aspect-ratio:auto;padding:12px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:6px;cursor:pointer;background:#fff;">
+          <strong style="font-size:0.82rem;">White design</strong>
+          <span class="hint" style="text-align:center;">(koyu template icin) Drag & drop veya tikla</span>
+          <span id="st_drop_white_name" class="hint" style="font-size:0.75rem;"></span>
+        </div>
+        <div id="st_drop_black" class="mu-tile" style="min-width:220px;max-width:260px;aspect-ratio:auto;padding:12px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:6px;cursor:pointer;background:#fff;">
+          <strong style="font-size:0.82rem;">Black design</strong>
+          <span class="hint" style="text-align:center;">(acik template icin) Drag & drop veya tikla</span>
+          <span id="st_drop_black_name" class="hint" style="font-size:0.75rem;"></span>
+        </div>
+        <button type="button" class="btn btn-secondary" onclick="stGenerateMockups(event)">Mockupları üret</button>
+      </div>
+
+      <div class="hint" style="margin:8px 0;">Kütüphane: üretmek istediğin template'leri seç (mavi çerçeve).</div>
+      <div id="st-lib-tabs" style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 10px;">
+        {% for cat in mockup_categories %}
+        <button
+          type="button"
+          class="btn btn-secondary st-lib-tab{% if loop.first %} st-lib-tab--active{% endif %}"
+          data-category="{{ cat.title|e }}"
+          style="padding:7px 11px;font-size:0.78rem;{% if loop.first %}background:var(--accent);color:#fff;border-color:var(--accent);{% endif %}"
+        >
+          {{ cat.title|e }}
+        </button>
+        {% endfor %}
+      </div>
+      <div id="st-lib-panels">
+        {% for cat in mockup_categories %}
+        <div class="mu-grid st-lib-panel" data-category="{{ cat.title|e }}" style="padding:0;{% if not loop.first %}display:none;{% endif %}">
+          {% for img in cat.images %}
+          <button type="button" class="mu-tile st-pick-template" data-url="{{ img.url|e }}" title="{{ cat.title|e }} / {{ img.filename|e }}" style="padding:0;border:1px solid var(--border);cursor:pointer;">
+            <img src="{{ img.url|e }}" alt="{{ img.filename|e }}" loading="lazy" />
+          </button>
+          {% endfor %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <div class="ws-section">
+    <div class="ws-section-head">Üretilen Mockuplar{% if current_batch %} · {{ current_batch|e }}{% endif %}</div>
+    <div class="ws-section-body">
+      <div id="st-generated-editor" class="ws-photo-editor" aria-label="Uretilen mockup görselleri"></div>
+      <div style="margin:8px 0 0;">
+        <button type="button" class="btn btn-secondary" onclick="stDownloadSelected(event)">İndir</button>
+      </div>
+      {% if not generated_urls %}
+      <p class="hint">Henüz üretim yapılmadı.</p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<form id="form-studio-generate" method="post" action="/studio/generate-mockups" enctype="multipart/form-data">
+  <input type="hidden" name="selected_template_urls" id="st_selected_template_urls" value="[]" />
+</form>
+<form id="form-studio-download-selected" method="post" action="/studio/download-selected-mockups">
+  <input type="hidden" name="selected_urls" id="st_selected_generated_urls" value="[]" />
+</form>
+
+<div id="st-lightbox" class="ws-lightbox" aria-hidden="true">
+  <img id="st-lightbox-img" alt="Mockup preview" />
+</div>
+
+<script type="application/json" id="st-generated-seed">{{ generated_urls | tojson }}</script>
+<script>
+  (function () {
+    const PLACEHOLDER_IMG = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2280%22 height=%2280%22%3E%3Crect fill=%22%23e5e7eb%22 width=%2280%22 height=%2280%22/%3E%3C/svg%3E';
+    const generatedSeedEl = document.getElementById('st-generated-seed');
+    const lightboxEl = document.getElementById('st-lightbox');
+    const lightboxImgEl = document.getElementById('st-lightbox-img');
+    let lightboxUrl = '';
+
+    function stDisplaySrc(raw) {
+      return (raw || '').trim();
+    }
+    function stIsMockupUrl(u) {
+      const s = (u || '').trim();
+      return s.indexOf('/media/mockups/') === 0 || s.indexOf('/media/workspace-mockups/') === 0;
+    }
+    function stOpenLightbox(url) {
+      const display = stDisplaySrc(url);
+      if (!display || !lightboxEl || !lightboxImgEl) return;
+      if (lightboxEl.classList.contains('is-open') && lightboxUrl === url) {
+        stCloseLightbox();
+        return;
+      }
+      lightboxUrl = url;
+      lightboxImgEl.src = display;
+      lightboxEl.classList.add('is-open');
+      lightboxEl.setAttribute('aria-hidden', 'false');
+    }
+    function stCloseLightbox() {
+      if (!lightboxEl) return;
+      lightboxEl.classList.remove('is-open');
+      lightboxEl.setAttribute('aria-hidden', 'true');
+      lightboxUrl = '';
+    }
+    function stMakeGeneratedTile(url) {
+      const tile = document.createElement('div');
+      tile.className = 'ws-photo-tile';
+      tile.setAttribute('data-url', url);
+      const pick = document.createElement('button');
+      pick.type = 'button';
+      pick.className = 'st-photo-pick';
+      pick.setAttribute('aria-label', 'Seç');
+      pick.textContent = '✓';
+      const img = document.createElement('img');
+      img.src = stDisplaySrc(url);
+      img.alt = '';
+      img.loading = 'lazy';
+      img.onerror = function () { img.onerror = null; img.src = PLACEHOLDER_IMG; };
+      tile.appendChild(pick);
+      tile.appendChild(img);
+      return tile;
+    }
+    function stRenderGenerated() {
+      const box = document.getElementById('st-generated-editor');
+      if (!box) return;
+      let urls = [];
+      try {
+        urls = JSON.parse((generatedSeedEl && generatedSeedEl.textContent ? generatedSeedEl.textContent : '[]'));
+      } catch (e) {
+        urls = [];
+      }
+      if (!Array.isArray(urls)) urls = [];
+      box.innerHTML = '';
+      urls.filter(stIsMockupUrl).forEach(function (u) {
+        box.appendChild(stMakeGeneratedTile(String(u).trim()));
+      });
+    }
+
+    window.stGenerateMockups = function (e) {
+      if (e && e.preventDefault) e.preventDefault();
+      const whiteFile = document.getElementById('st_design_white_file');
+      const blackFile = document.getElementById('st_design_black_file');
+      if (!whiteFile || !blackFile) return false;
+      if (!whiteFile.files || !whiteFile.files.length) { alert('White design dosyasını seçin.'); return false; }
+      if (!blackFile.files || !blackFile.files.length) { alert('Black design dosyasını seçin.'); return false; }
+      const selected = [];
+      document.querySelectorAll('.st-pick-template.st-pick-template--selected').forEach(function (btn) {
+        const u = (btn.getAttribute('data-url') || '').trim();
+        if (u) selected.push(u);
+      });
+      if (!selected.length) { alert('Lutfen en az bir template secin.'); return false; }
+      document.getElementById('st_selected_template_urls').value = JSON.stringify(selected);
+      document.getElementById('form-studio-generate').submit();
+      return false;
+    };
+
+    window.stDownloadSelected = function (e) {
+      if (e && e.preventDefault) e.preventDefault();
+      const selected = [];
+      document.querySelectorAll('#st-generated-editor .ws-photo-tile.st-generated-picked').forEach(function (tile) {
+        const u = (tile.getAttribute('data-url') || '').trim();
+        if (u && stIsMockupUrl(u)) selected.push(u);
+      });
+      if (!selected.length) { alert('Lutfen en az bir üretilmiş mockup seçin.'); return false; }
+      document.getElementById('st_selected_generated_urls').value = JSON.stringify(selected);
+      document.getElementById('form-studio-download-selected').submit();
+      return false;
+    };
+
+    function stBindDropZone(zoneId, inputId, labelId) {
+      const zone = document.getElementById(zoneId);
+      const input = document.getElementById(inputId);
+      const nameEl = document.getElementById(labelId);
+      if (!zone || !input) return;
+      function setFile(file) {
+        if (!file) return;
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        input.files = dt.files;
+        if (nameEl) nameEl.textContent = file.name;
+      }
+      zone.addEventListener('click', function () { input.click(); });
+      input.addEventListener('change', function () {
+        if (input.files && input.files.length && nameEl) nameEl.textContent = input.files[0].name;
+      });
+      ['dragenter', 'dragover'].forEach(function (evt) {
+        zone.addEventListener(evt, function (ev) {
+          ev.preventDefault();
+          zone.style.borderColor = 'var(--accent)';
+          zone.style.background = '#eef2ff';
+        });
+      });
+      ['dragleave', 'drop'].forEach(function (evt) {
+        zone.addEventListener(evt, function (ev) {
+          ev.preventDefault();
+          zone.style.borderColor = '';
+          zone.style.background = '#fff';
+        });
+      });
+      zone.addEventListener('drop', function (ev) {
+        const files = ev.dataTransfer && ev.dataTransfer.files;
+        if (!files || !files.length) return;
+        setFile(files[0]);
+      });
+    }
+
+    document.querySelectorAll('.st-pick-template').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        btn.classList.toggle('st-pick-template--selected');
+        if (btn.classList.contains('st-pick-template--selected')) {
+          btn.style.outline = '2px solid var(--accent)';
+          btn.style.outlineOffset = '2px';
+        } else {
+          btn.style.outline = '';
+          btn.style.outlineOffset = '';
+        }
+      });
+    });
+
+    (function stInitLibraryTabs() {
+      const tabs = Array.from(document.querySelectorAll('.st-lib-tab'));
+      const panels = Array.from(document.querySelectorAll('.st-lib-panel'));
+      if (!tabs.length || !panels.length) return;
+      function setActive(cat) {
+        tabs.forEach(function (t) {
+          const on = (t.getAttribute('data-category') || '') === cat;
+          t.classList.toggle('st-lib-tab--active', on);
+          t.style.background = on ? 'var(--accent)' : '';
+          t.style.color = on ? '#fff' : '';
+          t.style.borderColor = on ? 'var(--accent)' : '';
+        });
+        panels.forEach(function (p) {
+          const on = (p.getAttribute('data-category') || '') === cat;
+          p.style.display = on ? 'grid' : 'none';
+        });
+      }
+      tabs.forEach(function (t) {
+        t.addEventListener('click', function () {
+          setActive((t.getAttribute('data-category') || '').trim());
+        });
+      });
+    })();
+
+    const generatedBox = document.getElementById('st-generated-editor');
+    if (generatedBox) {
+      generatedBox.addEventListener('click', function (ev) {
+        const pick = ev.target.closest('.st-photo-pick');
+        if (pick) {
+          const tile = pick.closest('.ws-photo-tile');
+          if (!tile) return;
+          tile.classList.toggle('st-generated-picked');
+          if (tile.classList.contains('st-generated-picked')) {
+            tile.style.outline = '2px solid #0f766e';
+            tile.style.outlineOffset = '2px';
+          } else {
+            tile.style.outline = '';
+            tile.style.outlineOffset = '';
+          }
+          return;
+        }
+        const tile = ev.target.closest('.ws-photo-tile');
+        if (!tile || !generatedBox.contains(tile)) return;
+        const u = (tile.getAttribute('data-url') || '').trim();
+        if (!u) return;
+        stOpenLightbox(u);
+      });
+    }
+    if (lightboxEl) lightboxEl.addEventListener('click', stCloseLightbox);
+    document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') stCloseLightbox(); });
+    stBindDropZone('st_drop_white', 'st_design_white_file', 'st_drop_white_name');
+    stBindDropZone('st_drop_black', 'st_design_black_file', 'st_drop_black_name');
+    stRenderGenerated();
+  })();
+</script>
+<style>
+  .st-photo-pick {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    width: 28px;
+    height: 28px;
+    border: none;
+    border-radius: 50%;
+    background: rgba(15, 118, 110, 0.85);
+    color: #fff;
+    font-size: 14px;
+    cursor: pointer;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .st-photo-pick:hover { background: #0f766e; }
+</style>
+{% endblock %}

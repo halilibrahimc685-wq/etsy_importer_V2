@@ -1,0 +1,10 @@
+Mockups/**
+!Mockups/placement.json
+drafts/**
+.git/**
+.venv/**
+venv/**
+__pycache__/**
+*.pyc
+.env
+.env.*
