@@ -312,6 +312,8 @@ def _mockup_library_empty_note(categories: list[dict[str, Any]]) -> Optional[str
             "(.vercelignore — sadece Mockups/placement.json gelir). Bu yüzden klasör “bulunur” "
             "görünse de şablon PNG’leri yoktur. Kütüphane ve üretim için Vercel ortam değişkenlerinde "
             "S3_* (Cloudflare R2) tanımlayıp görselleri bucket’a yükleyin; uygulama o zaman R2’den listeler. "
+            "Yerel Mockups klasörünü bucketa doğru yapıda yüklemek için repodaki "
+            "scripts/sync-mockups-to-r2.sh scriptini kullanın (.env içinde aynı S3_* değişkenleri). "
             "Yerel bilgisayarda çalıştırırken tam Mockups klasörü kullanılabilir."
         )
     if _r2_enabled():
@@ -429,6 +431,26 @@ def _template_rels_from_urls(urls: list[str]) -> list[str]:
         seen.add(rel)
         out.append(rel)
     return out
+
+
+def _seed_placement_json_into_run_root(run_root: Path) -> None:
+    """R2 modunda gecici mockup_root'a placement.json koy (yerlesim anahtarlari)."""
+    chosen: Optional[Path] = None
+    local_cfg = _mockups_root() / "placement.json"
+    if local_cfg.is_file():
+        chosen = local_cfg
+    else:
+        bundle_cfg = Path(__file__).resolve().parent / "Mockups" / "placement.json"
+        if bundle_cfg.is_file():
+            chosen = bundle_cfg
+    if chosen is None:
+        return
+    try:
+        (run_root / "placement.json").write_bytes(chosen.read_bytes())
+    except OSError:
+        logging.getLogger("uvicorn.error").exception(
+            "placement.json kopyalanamadi: %s -> %s", chosen, run_root
+        )
 
 
 def _download_r2_templates(temp_root: Path, rels: list[str]) -> list[Path]:
@@ -1352,6 +1374,7 @@ async def studio_generate_mockups(
         if r2_mode:
             run_root = (WORKSPACE_DESIGNS_ROOT / f"{batch_id}_mockups_src").resolve()
             run_root.mkdir(parents=True, exist_ok=True)
+            _seed_placement_json_into_run_root(run_root)
         cfg = MockupProcessingConfig(
             mockups_root=run_root,
             dark_design_path=black_design_path,
@@ -1660,6 +1683,7 @@ async def workspace_generate_mockups(
         if r2_mode:
             run_root = (WORKSPACE_DESIGNS_ROOT / f"{batch_id}_mockups_src").resolve()
             run_root.mkdir(parents=True, exist_ok=True)
+            _seed_placement_json_into_run_root(run_root)
         cfg = MockupProcessingConfig(
             mockups_root=run_root,
             dark_design_path=black_design_path,
