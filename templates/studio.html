@@ -15,6 +15,12 @@
 {% if mockup_library_note %}
 <div class="alert alert-warning" style="margin:10px 0 14px;"><strong>Mockup kütüphanesi boş.</strong> {{ mockup_library_note|e }}</div>
 {% endif %}
+<p class="hint" style="margin:0 0 12px;font-size:0.78rem;line-height:1.45;">
+  {% if vercel_runtime %}Ortam: <strong>Vercel</strong> · {% endif %}
+  R2: {% if r2_active %}<strong>açık</strong>{% else %}<strong>kapalı</strong> (S3_BUCKET, S3_ENDPOINT, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY){% endif %}
+  · S3_PREFIX: <code>{{ s3_prefix_label|e }}</code>
+  {% if r2_active %}· Kütüphanede <strong>{{ mockup_catalog_image_count }}</strong> şablon görseli{% endif %}
+</p>
 
 <div class="ws-page">
   <p class="hint" style="margin-bottom:16px;">Design dosyalarını yükle, kütüphaneden template seç, mockup üret ve bilgisayarına indir.</p>

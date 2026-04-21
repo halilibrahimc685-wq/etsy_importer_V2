@@ -17,6 +17,7 @@ from urllib.parse import quote, unquote, urlparse
 
 import httpx
 import boto3
+from botocore.config import Config
 from PIL import Image
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -143,6 +144,7 @@ def _r2_client():
         region_name=region,
         aws_access_key_id=(os.environ.get("S3_ACCESS_KEY_ID") or "").strip(),
         aws_secret_access_key=(os.environ.get("S3_SECRET_ACCESS_KEY") or "").strip(),
+        config=Config(signature_version="s3v4"),
     )
 
 
@@ -302,6 +304,20 @@ def _on_vercel() -> bool:
     return bool((os.environ.get("VERCEL") or "").strip())
 
 
+def _s3_prefix_label() -> str:
+    raw = (os.environ.get("S3_PREFIX") or "").strip()
+    return raw if raw else "(boş — nesneler bucket kökünde, örn. CC Long/1.png)"
+
+
+def _mockup_catalog_image_count(categories: list[dict[str, Any]]) -> int:
+    n = 0
+    for cat in categories:
+        imgs = cat.get("images")
+        if isinstance(imgs, list):
+            n += len(imgs)
+    return n
+
+
 def _mockup_library_empty_note(categories: list[dict[str, Any]]) -> Optional[str]:
     """Katalog boşken kullanıcıya nedenini anlat (özellikle Vercel + .vercelignore)."""
     if categories:
@@ -317,9 +333,15 @@ def _mockup_library_empty_note(categories: list[dict[str, Any]]) -> Optional[str
             "Yerel bilgisayarda çalıştırırken tam Mockups klasörü kullanılabilir."
         )
     if _r2_enabled():
+        pfx = _s3_prefix_label()
         return (
-            "R2 (S3_*) tanımlı ama katalog boş. Bucket’ta dosya var mı, S3_PREFIX doğru mu kontrol edin. "
-            "Bir ağ/kimlik hatası Vercel Runtime log’larına düşmüş olabilir."
+            "R2 (S3_*) tanımlı ama katalog boş. En sık neden: Vercel’deki S3_PREFIX ile bucketa yüklediğiniz "
+            "yol uyuşmuyor. Şu an uygulama şu prefix ile listeliyor: "
+            f"{pfx}. "
+            "Dosyaları bucket köküne (T-shirt/1.png gibi) koyduysanız S3_PREFIX’i tamamen silin/boş bırakın. "
+            "Sync scriptinde prefix kullandıysanız Vercel’de aynı değeri verin. "
+            "Kökte hâlâ 'CC Long:1.png' gibi iki noktalı isimler varsa silin; uygulama 'CC Long/1.png' arar. "
+            "Listeleme hatası olmuşsa Vercel Runtime log’larında boto3/403/404 mesajına bakın."
         )
     root = _mockups_root()
     if not root.is_dir():
@@ -466,7 +488,13 @@ def _download_r2_templates(temp_root: Path, rels: list[str]) -> list[Path]:
         target = (temp_root / rel).resolve()
         target.parent.mkdir(parents=True, exist_ok=True)
         key = _r2_key_for_rel(rel)
-        client.download_file(bucket, key, str(target))
+        try:
+            client.download_file(bucket, key, str(target))
+        except Exception:
+            logging.getLogger("uvicorn.error").exception(
+                "R2 download_file basarisiz bucket=%s key=%s rel=%s", bucket, key, rel
+            )
+            raise
         out.append(target)
     return out
 
@@ -1266,6 +1294,10 @@ def studio_page(
             "error": error.strip() or None,
             "mockup_categories": mockup_categories,
             "mockup_library_note": _mockup_library_empty_note(mockup_categories),
+            "r2_active": _r2_enabled(),
+            "vercel_runtime": _on_vercel(),
+            "s3_prefix_label": _s3_prefix_label(),
+            "mockup_catalog_image_count": _mockup_catalog_image_count(mockup_categories),
             "mockups_root_path": str(mockups_root),
             "mockups_root_exists": mockups_root.is_dir(),
             "generated_urls": generated_urls,
@@ -1278,7 +1310,7 @@ def studio_page(
 @app.get("/media/mockups/{path:path}")
 def mockup_media(path: str) -> FileResponse:
     if _r2_enabled():
-        rel = (path or "").strip().replace("\\", "/")
+        rel = unquote((path or "").strip().replace("\\", "/")).lstrip("/")
         if not rel or ".." in rel.split("/"):
             raise HTTPException(status_code=404, detail="Mockup bulunamadı")
         ext = Path(rel).suffix.lower()
@@ -1296,6 +1328,9 @@ def mockup_media(path: str) -> FileResponse:
             resp = _r2_client().get_object(Bucket=bucket, Key=key)
             data = resp["Body"].read()
         except Exception:
+            logging.getLogger("uvicorn.error").exception(
+                "R2 get_object basarisiz bucket=%s key=%s rel=%s", bucket, key, rel
+            )
             raise HTTPException(status_code=404, detail="Mockup bulunamadı")
         ct = media.get(ext, "application/octet-stream")
         return Response(content=data, media_type=ct)
