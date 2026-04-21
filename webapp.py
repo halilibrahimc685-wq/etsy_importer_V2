@@ -228,7 +228,11 @@ def _list_mockup_catalog() -> list[dict[str, Any]]:
             )
             return []
         groups: dict[str, list[str]] = {}
+        ws_staging = _r2_workspace_output_prefix().strip("/")
         for rel in keys:
+            rnorm = str(rel or "").replace("\\", "/").lstrip("/")
+            if ws_staging and (rnorm == ws_staging or rnorm.startswith(f"{ws_staging}/")):
+                continue
             parts = [p for p in rel.split("/") if p]
             if not parts:
                 continue
@@ -359,7 +363,10 @@ def _mockup_library_empty_note(categories: list[dict[str, Any]]) -> Optional[str
 
 
 def _is_mockup_media_url(u: str) -> bool:
-    return u.startswith("/media/mockups/") or u.startswith("/media/workspace-mockups/")
+    s = str(u or "").strip()
+    return s.startswith("/media/mockups/") or s.startswith(
+        "/media/workspace-mockups/"
+    ) or s.startswith("/media/workspace-r2/")
 
 
 def _workspace_mockup_rel_url(rel: str) -> str:
@@ -396,7 +403,107 @@ def _latest_workspace_batch_dir() -> Optional[Path]:
     return max(dirs, key=lambda p: p.stat().st_mtime)
 
 
+def _r2_workspace_output_prefix() -> str:
+    raw = (os.environ.get("S3_WORKSPACE_OUTPUT_PREFIX") or "workspace-generated").strip().strip(
+        "/"
+    )
+    return (raw + "/") if raw else "workspace-generated/"
+
+
+def _r2_workspace_batch_s3_prefix(batch_id: str) -> str:
+    bid = (batch_id or "").strip()
+    return f"{_r2_workspace_output_prefix()}{bid}/"
+
+
+def _workspace_r2_mockup_url(batch_id: str, rel: str) -> str:
+    bid = (batch_id or "").strip()
+    rel_norm = (rel or "").strip().replace("\\", "/").lstrip("/")
+    parts: list[str] = [bid] + [p for p in rel_norm.split("/") if p and p != "."]
+    return "/media/workspace-r2/" + "/".join(quote(p, safe="") for p in parts)
+
+
+def _r2_mirror_workspace_batch(batch_id: str, batch_dir: Path) -> None:
+    """Vercel: /tmp batch farkli lambda'da olmayabilir; R2'ye kopyala."""
+    if not _r2_enabled():
+        return
+    bucket = (os.environ.get("S3_BUCKET") or "").strip()
+    if not bucket or not batch_dir.is_dir():
+        return
+    prefix = _r2_workspace_batch_s3_prefix(batch_id)
+    client = _r2_client()
+    batch_resolved = batch_dir.resolve()
+    for p in sorted(batch_resolved.rglob("*")):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            continue
+        try:
+            rel = p.resolve().relative_to(batch_resolved).as_posix()
+        except ValueError:
+            continue
+        key = f"{prefix}{rel}".replace("\\", "/")
+        try:
+            client.upload_file(str(p), bucket, key)
+        except Exception:
+            logging.getLogger("uvicorn.error").exception(
+                "R2 workspace mirror upload basarisiz bucket=%s key=%s", bucket, key
+            )
+
+
+def _r2_remote_workspace_batch_has_objects(batch_id: str) -> bool:
+    if not _r2_enabled():
+        return False
+    bucket = (os.environ.get("S3_BUCKET") or "").strip()
+    if not bucket:
+        return False
+    prefix = _r2_workspace_batch_s3_prefix(batch_id)
+    try:
+        resp = _r2_client().list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+        return bool(resp.get("Contents"))
+    except Exception:
+        return False
+
+
+def _r2_list_workspace_batch_urls(batch_id: str) -> list[str]:
+    if not _r2_enabled():
+        return []
+    bucket = (os.environ.get("S3_BUCKET") or "").strip()
+    if not bucket:
+        return []
+    prefix = _r2_workspace_batch_s3_prefix(batch_id)
+    client = _r2_client()
+    urls: list[str] = []
+    token: Optional[str] = None
+    while True:
+        kw: dict[str, Any] = {"Bucket": bucket, "Prefix": prefix, "MaxKeys": 1000}
+        if token:
+            kw["ContinuationToken"] = token
+        resp = client.list_objects_v2(**kw)
+        for obj in (resp.get("Contents") or []):
+            k = str(obj.get("Key") or "")
+            if not k or k.endswith("/"):
+                continue
+            ext = Path(k).suffix.lower()
+            if ext not in SUPPORTED_EXTENSIONS:
+                continue
+            if not k.startswith(prefix):
+                continue
+            rel = k[len(prefix) :].lstrip("/")
+            if not rel or ".." in rel.split("/"):
+                continue
+            urls.append(_workspace_r2_mockup_url(batch_id, rel))
+        if not resp.get("IsTruncated"):
+            break
+        token = str(resp.get("NextContinuationToken") or "")
+        if not token:
+            break
+    return sorted(urls, key=lambda s: s.lower())
+
+
 def _workspace_urls_for_batch(batch: Path) -> list[str]:
+    batch_id = batch.name
+    if _r2_remote_workspace_batch_has_objects(batch_id):
+        return _r2_list_workspace_batch_urls(batch_id)
     urls: list[str] = []
     for p in sorted(batch.rglob("*")):
         if not p.is_file() or p.suffix.lower() not in SUPPORTED_EXTENSIONS:
@@ -417,6 +524,39 @@ def _workspace_path_from_media_url(url: str) -> Optional[Path]:
     if not rel or ".." in rel.split("/"):
         return None
     return _safe_workspace_mockup_file_path(rel)
+
+
+def _workspace_r2_key_from_media_url(url: str) -> Optional[str]:
+    u = str(url or "").strip()
+    api = "/media/workspace-r2/"
+    if not u.startswith(api):
+        return None
+    tail = u[len(api) :]
+    raw_parts = [p for p in tail.split("/") if p]
+    if len(raw_parts) < 2:
+        return None
+    bid = unquote(raw_parts[0])
+    rel_parts = [unquote(p) for p in raw_parts[1:]]
+    if ".." in bid or "/" in bid:
+        return None
+    if any(".." in x for x in rel_parts):
+        return None
+    rel = "/".join(rel_parts)
+    if not rel:
+        return None
+    return f"{_r2_workspace_batch_s3_prefix(bid)}{rel}"
+
+
+def _workspace_r2_zip_arcname(url: str) -> str:
+    u = str(url or "").strip()
+    api = "/media/workspace-r2/"
+    if not u.startswith(api):
+        return "image.png"
+    tail = u[len(api) :]
+    parts = [unquote(p) for p in tail.split("/") if p]
+    if len(parts) < 2:
+        return "image.png"
+    return "/".join(parts)
 
 
 def _template_paths_from_urls(urls: list[str], root: Path) -> list[Path]:
@@ -1355,7 +1495,8 @@ def mockup_media(path: str) -> FileResponse:
 
 @app.get("/media/workspace-mockups/{path:path}")
 def workspace_mockup_media(path: str) -> FileResponse:
-    p = _safe_workspace_mockup_file_path(path)
+    rel = unquote((path or "").strip().replace("\\", "/")).lstrip("/")
+    p = _safe_workspace_mockup_file_path(rel)
     if not p:
         raise HTTPException(status_code=404, detail="Workspace mockup bulunamadı")
     media = {
@@ -1366,6 +1507,40 @@ def workspace_mockup_media(path: str) -> FileResponse:
     }
     ct = media.get(p.suffix.lower(), "application/octet-stream")
     return FileResponse(p, media_type=ct, filename=p.name)
+
+
+@app.get("/media/workspace-r2/{batch_id}/{path:path}")
+def workspace_r2_mockup_media(batch_id: str, path: str) -> Response:
+    """Vercel: üretilen batch R2'de; önizleme bu rota üzerinden."""
+    if not _r2_enabled():
+        raise HTTPException(status_code=404, detail="Workspace mockup bulunamadı")
+    bid = (batch_id or "").strip()
+    if not bid or ".." in bid or "/" in bid:
+        raise HTTPException(status_code=404, detail="Workspace mockup bulunamadı")
+    rel = unquote((path or "").strip().replace("\\", "/")).lstrip("/")
+    if not rel or ".." in rel.split("/"):
+        raise HTTPException(status_code=404, detail="Workspace mockup bulunamadı")
+    key = f"{_r2_workspace_batch_s3_prefix(bid)}{rel}"
+    bucket = (os.environ.get("S3_BUCKET") or "").strip()
+    ext = Path(rel).suffix.lower()
+    media = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+    }
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(status_code=404, detail="Workspace mockup bulunamadı")
+    try:
+        resp = _r2_client().get_object(Bucket=bucket, Key=key)
+        data = resp["Body"].read()
+    except Exception:
+        logging.getLogger("uvicorn.error").exception(
+            "R2 workspace-r2 get_object bucket=%s key=%s", bucket, key
+        )
+        raise HTTPException(status_code=404, detail="Workspace mockup bulunamadı")
+    ct = media.get(ext, "application/octet-stream")
+    return Response(content=data, media_type=ct)
 
 
 @app.post("/studio/set-mockups-dir", response_class=HTMLResponse)
@@ -1444,6 +1619,13 @@ async def studio_generate_mockups(
             out_paths, failed = process_all(cfg)
         if not out_paths:
             raise RuntimeError("Mockup uretilemedi.")
+        if _on_vercel() and _r2_enabled():
+            try:
+                _r2_mirror_workspace_batch(batch_id, out_root)
+            except Exception:
+                logging.getLogger("uvicorn.error").exception(
+                    "R2 workspace batch mirror basarisiz batch_id=%s", batch_id
+                )
         status = quote(f"{len(out_paths)} mockup uretildi." + (f" {failed} dosya basarisiz." if failed else ""))
         return RedirectResponse(url=f"/studio?status={status}&batch={quote(batch_id)}", status_code=303)
     except Exception as exc:
@@ -1478,21 +1660,28 @@ def studio_download_selected_mockups(selected_urls: str = Form("[]")) -> Respons
     if not isinstance(raw, list):
         raw = []
     files: list[Path] = []
+    r2_pairs: list[tuple[str, str]] = []
     seen: set[str] = set()
     for item in raw:
         if not isinstance(item, str):
             continue
         p = _workspace_path_from_media_url(item)
-        if not p:
+        if p:
+            key = str(p.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            files.append(p)
             continue
-        key = str(p.resolve())
-        if key in seen:
-            continue
-        seen.add(key)
-        files.append(p)
-    if not files:
+        rk = _workspace_r2_key_from_media_url(item)
+        if rk and rk not in seen:
+            seen.add(rk)
+            r2_pairs.append((rk, _workspace_r2_zip_arcname(item)))
+    if not files and not r2_pairs:
         raise HTTPException(status_code=400, detail="Indirilecek secili mockup bulunamadi.")
     buf = io.BytesIO()
+    bucket = (os.environ.get("S3_BUCKET") or "").strip()
+    client = _r2_client() if r2_pairs else None
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for p in files:
             try:
@@ -1500,6 +1689,15 @@ def studio_download_selected_mockups(selected_urls: str = Form("[]")) -> Respons
             except ValueError:
                 rel = p.name
             zf.write(p, arcname=rel)
+        if client and bucket:
+            for s3_key, arc in r2_pairs:
+                try:
+                    body = client.get_object(Bucket=bucket, Key=s3_key)["Body"].read()
+                    zf.writestr(arc, body)
+                except Exception:
+                    logging.getLogger("uvicorn.error").exception(
+                        "Zip R2 okuma basarisiz key=%s", s3_key
+                    )
     headers = {
         "Content-Disposition": 'attachment; filename="selected_mockups.zip"',
         "Cache-Control": "no-store",
@@ -1750,13 +1948,23 @@ async def workspace_generate_mockups(
         out_paths, failed = _process_selected_mockups(cfg, selected_paths) if selected_paths else process_all(cfg)
         if not out_paths:
             raise RuntimeError("Mockup üretilemedi. Mockups klasörünü ve design dosyasını kontrol edin.")
-        urls: list[str] = []
-        for p in out_paths:
+        if _on_vercel() and _r2_enabled():
             try:
-                rel = p.resolve().relative_to(WORKSPACE_MOCKUPS_ROOT.resolve()).as_posix()
-            except ValueError:
-                continue
-            urls.append(_workspace_mockup_rel_url(rel))
+                _r2_mirror_workspace_batch(batch_id, out_root)
+            except Exception:
+                logging.getLogger("uvicorn.error").exception(
+                    "R2 workspace batch mirror basarisiz batch_id=%s", batch_id
+                )
+        urls: list[str] = []
+        if _on_vercel() and _r2_enabled() and _r2_remote_workspace_batch_has_objects(batch_id):
+            urls = _r2_list_workspace_batch_urls(batch_id)
+        if not urls:
+            for p in out_paths:
+                try:
+                    rel = p.resolve().relative_to(WORKSPACE_MOCKUPS_ROOT.resolve()).as_posix()
+                except ValueError:
+                    continue
+                urls.append(_workspace_mockup_rel_url(rel))
         if not urls:
             raise RuntimeError("Mockup görselleri URL'e dönüştürülemedi.")
 

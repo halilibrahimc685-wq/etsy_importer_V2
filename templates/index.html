@@ -196,12 +196,14 @@
                   if (typeof u !== 'string') return false;
                   const s = u.trim();
                   if (!s) return false;
-                  return s.indexOf('/media/mockups/') !== 0 && s.indexOf('/media/workspace-mockups/') !== 0;
+                  return s.indexOf('/media/mockups/') !== 0 && s.indexOf('/media/workspace-mockups/') !== 0
+                    && s.indexOf('/media/workspace-r2/') !== 0;
                 }
                 function wsIsMockupUrl(u) {
                   if (typeof u !== 'string') return false;
                   const s = u.trim();
-                  return s.indexOf('/media/mockups/') === 0 || s.indexOf('/media/workspace-mockups/') === 0;
+                  return s.indexOf('/media/mockups/') === 0 || s.indexOf('/media/workspace-mockups/') === 0
+                    || s.indexOf('/media/workspace-r2/') === 0;
                 }
                 function wsDisplaySrc(raw) {
                   var u = (raw || '').trim();

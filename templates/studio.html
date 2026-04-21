@@ -125,7 +125,8 @@
     }
     function stIsMockupUrl(u) {
       const s = (u || '').trim();
-      return s.indexOf('/media/mockups/') === 0 || s.indexOf('/media/workspace-mockups/') === 0;
+      return s.indexOf('/media/mockups/') === 0 || s.indexOf('/media/workspace-mockups/') === 0
+        || s.indexOf('/media/workspace-r2/') === 0;
     }
     function stOpenLightbox(url) {
       const display = stDisplaySrc(url);
