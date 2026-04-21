@@ -49,8 +49,18 @@ from scraper import parse_rendered_html, scrape_with_playwright, to_draft_dict
 
 load_dotenv()
 
+# Vercel serverless: proje dizini salt okunur; state ve üretilen mockuplar /tmp altında tutulur.
+def _drafts_base_dir() -> Path:
+    if (os.environ.get("VERCEL") or "").strip():
+        return Path("/tmp/drafts")
+    return Path("drafts")
+
+
+_DRAFTS_BASE = _drafts_base_dir()
+
 app = FastAPI(title="Amazon -> Etsy Importer")
-templates = Jinja2Templates(directory="templates")
+_templates_dir = (Path(__file__).resolve().parent / "templates").resolve()
+templates = Jinja2Templates(directory=str(_templates_dir))
 
 
 def amazon_image_display_url(raw: Optional[str]) -> str:
@@ -92,10 +102,10 @@ def _workspace_draft_stripped_for_storage(draft: Any) -> Any:
     out.pop("debug", None)
     return out
 
-APP_DRAFTS_FILE = Path("drafts") / "app_draft_listings.json"
-WORKSPACE_STATES_FILE = Path("drafts") / "workspace_states.json"
-WORKSPACE_MOCKUPS_ROOT = Path("drafts") / "mockups_generated" / "_workspace"
-WORKSPACE_DESIGNS_ROOT = Path("drafts") / "_workspace_designs"
+APP_DRAFTS_FILE = _DRAFTS_BASE / "app_draft_listings.json"
+WORKSPACE_STATES_FILE = _DRAFTS_BASE / "workspace_states.json"
+WORKSPACE_MOCKUPS_ROOT = _DRAFTS_BASE / "mockups_generated" / "_workspace"
+WORKSPACE_DESIGNS_ROOT = _DRAFTS_BASE / "_workspace_designs"
 _ETSY_TAG_MAX_LEN = 20
 _ETSY_TAG_MAX_COUNT = 13
 
@@ -202,7 +212,13 @@ def _safe_mockup_file_path(rel: str) -> Optional[Path]:
 
 def _list_mockup_catalog() -> list[dict[str, Any]]:
     if _r2_enabled():
-        keys = _r2_list_keys()
+        try:
+            keys = _r2_list_keys()
+        except Exception:
+            logging.getLogger("uvicorn.error").exception(
+                "R2 mockup katalogu listelenemedi (S3_* ortam degiskenlerini kontrol edin)"
+            )
+            return []
         groups: dict[str, list[str]] = {}
         for rel in keys:
             parts = [p for p in rel.split("/") if p]
