@@ -4,8 +4,12 @@
 # Beklenen bucket anahtarlari (S3_PREFIX bos ise):
 #   T-shirt/1.png
 #   CC T-shirt/1.png
+#   CC Long/1.png     <- klasor + slash + dosya adi
 #   Kids/1.png
 #   placement.json   (kokte; uygulama Vercel'de repodan da okur, yine de yuklemeniz zarar vermez)
+#
+# YANLIS: kokte "CC Long:1.png" (iki nokta ust uste) — R2 arayuzunde klasor yerine
+# boyle dosya olusursa placement.json ve uygulama "CC Long/1.png" arar, bulamaz.
 #
 # S3_PREFIX=mockups ise anahtarlar:
 #   mockups/T-shirt/1.png
