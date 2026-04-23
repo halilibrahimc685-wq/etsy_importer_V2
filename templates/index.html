@@ -420,7 +420,45 @@
                   document.getElementById('form-generate-tags').submit();
                   return false;
                 };
-                window.wsGenerateMockups = function (e) {
+                async function wsOptimizeUploadFile(file, role) {
+                  const MAX_SIDE = 3400;
+                  const TARGET_MAX_BYTES = 2 * 1024 * 1024;
+                  if (!file) return null;
+                  if (file.size <= TARGET_MAX_BYTES) return file;
+                  let bmp;
+                  try {
+                    bmp = await createImageBitmap(file);
+                  } catch (err) {
+                    return file;
+                  }
+                  const ow = bmp.width || 1;
+                  const oh = bmp.height || 1;
+                  const scale = Math.min(1, MAX_SIDE / Math.max(ow, oh));
+                  const nw = Math.max(1, Math.round(ow * scale));
+                  const nh = Math.max(1, Math.round(oh * scale));
+                  const canvas = document.createElement('canvas');
+                  canvas.width = nw;
+                  canvas.height = nh;
+                  const ctx = canvas.getContext('2d', { alpha: true });
+                  if (!ctx) return file;
+                  ctx.imageSmoothingEnabled = true;
+                  ctx.imageSmoothingQuality = 'high';
+                  ctx.drawImage(bmp, 0, 0, nw, nh);
+                  const tries = [0.95, 0.9, 0.85, 0.8, 0.75, 0.7];
+                  for (let i = 0; i < tries.length; i += 1) {
+                    const q = tries[i];
+                    const blob = await new Promise(function(resolve){
+                      canvas.toBlob(resolve, 'image/webp', q);
+                    });
+                    if (!blob) continue;
+                    if (blob.size <= TARGET_MAX_BYTES || i === tries.length - 1) {
+                      const nameBase = (file.name || role || 'design').replace(/\.[^.]+$/, '');
+                      return new File([blob], nameBase + '.webp', { type: 'image/webp' });
+                    }
+                  }
+                  return file;
+                }
+                window.wsGenerateMockups = async function (e) {
                   if (e && e.preventDefault) e.preventDefault();
                   const whiteFile = document.getElementById('ws_design_white_file');
                   const blackFile = document.getElementById('ws_design_black_file');
@@ -442,6 +480,22 @@
                     alert('Lutfen en az bir mockup template secin.');
                     return false;
                   }
+                  const optWhite = await wsOptimizeUploadFile(whiteFile.files[0], 'white');
+                  const optBlack = await wsOptimizeUploadFile(blackFile.files[0], 'black');
+                  if (!optWhite || !optBlack) {
+                    alert('Design dosyaları hazırlanırken bir hata oluştu.');
+                    return false;
+                  }
+                  if ((optWhite.size + optBlack.size) > (4 * 1024 * 1024)) {
+                    alert('Dosyalar hala çok büyük. Biraz daha küçük design yüklemeyi deneyin.');
+                    return false;
+                  }
+                  const dtW = new DataTransfer();
+                  dtW.items.add(optWhite);
+                  whiteFile.files = dtW.files;
+                  const dtB = new DataTransfer();
+                  dtB.items.add(optBlack);
+                  blackFile.files = dtB.files;
                   document.getElementById('field_selected_template_urls').value = JSON.stringify(selected);
                   document.getElementById('field_mockup_json').value = JSON.stringify(wsBuildDraftObject());
                   document.getElementById('form-generate-mockups').submit();
