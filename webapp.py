@@ -397,6 +397,55 @@ def _r2_workspace_batch_s3_prefix(batch_id: str) -> str:
     return f"{_r2_workspace_output_prefix()}{bid}/"
 
 
+def _r2_workspace_design_s3_key(batch_id: str, role: str, suffix: str) -> str:
+    bid = (batch_id or "").strip()
+    rr = (role or "").strip().lower() or "design"
+    suf = (suffix or "").strip().lower()
+    if not suf.startswith("."):
+        suf = ".webp"
+    return f"{_r2_workspace_output_prefix()}{bid}/_designs/{rr}{suf}"
+
+
+def _r2_upload_workspace_design(batch_id: str, role: str, design_path: Path) -> str:
+    if not _r2_enabled():
+        return ""
+    bucket = (os.environ.get("S3_BUCKET") or "").strip()
+    if not bucket or not design_path.is_file():
+        return ""
+    key = _r2_workspace_design_s3_key(batch_id, role, design_path.suffix)
+    try:
+        _r2_client().upload_file(str(design_path), bucket, key)
+        return key
+    except Exception:
+        logging.getLogger("uvicorn.error").exception(
+            "R2 workspace design upload basarisiz bucket=%s key=%s", bucket, key
+        )
+        return ""
+
+
+def _r2_download_workspace_design_to_tmp(
+    key: str, *, batch_id: str, role: str, fallback_suffix: str = ".webp"
+) -> Optional[Path]:
+    if not _r2_enabled():
+        return None
+    bucket = (os.environ.get("S3_BUCKET") or "").strip()
+    k = (key or "").strip()
+    if not bucket or not k:
+        return None
+    ext = Path(k).suffix.lower() or fallback_suffix
+    out = (WORKSPACE_DESIGNS_ROOT / f"{batch_id}_{role}_r2{ext}").resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _r2_client().download_file(bucket, k, str(out))
+        if out.is_file():
+            return out
+    except Exception:
+        logging.getLogger("uvicorn.error").exception(
+            "R2 workspace design download basarisiz bucket=%s key=%s", bucket, k
+        )
+    return None
+
+
 def _workspace_r2_mockup_url(batch_id: str, rel: str) -> str:
     bid = (batch_id or "").strip()
     rel_norm = (rel or "").strip().replace("\\", "/").lstrip("/")
@@ -1864,10 +1913,12 @@ def workspace_download_selected_mockups(selected_urls: str = Form("[]")) -> Resp
 
 
 @app.post("/workspace/analyze-design", response_class=HTMLResponse)
-def workspace_analyze_design(
+async def workspace_analyze_design(
     request: Request,
     draft_json: str = Form("{}"),
+    design_black_file: Optional[UploadFile] = File(None),
 ) -> HTMLResponse:
+    temp_uploaded_path: Optional[Path] = None
     try:
         draft = json.loads(draft_json or "{}")
         if not isinstance(draft, dict):
@@ -1875,10 +1926,44 @@ def workspace_analyze_design(
         draft = _normalize_images_only_draft(draft)
         wa = draft.get("workspace_assets")
         assets = wa if isinstance(wa, dict) else {}
-        black_path_raw = str(assets.get("black_design_path") or "").strip()
-        if not black_path_raw:
-            raise RuntimeError("Önce mockup üretimi yapıp black design yükleyin.")
-        black_path = Path(black_path_raw).expanduser().resolve()
+        black_path: Optional[Path] = None
+
+        # Ephemeral analiz: kullanıcı black dosyayı yeni yüklediyse direkt onu kullan.
+        if design_black_file is not None and (design_black_file.filename or "").strip():
+            tmp_batch = f"analyze_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
+            temp_uploaded_path = await _save_uploaded_design_file(
+                design_black_file, batch_id=tmp_batch, role="black"
+            )
+            black_path = temp_uploaded_path
+
+        # Yükleme yoksa mevcut draft yolunu dene (geriye uyumluluk).
+        if black_path is None:
+            black_path_raw = str(assets.get("black_design_path") or "").strip()
+            if black_path_raw:
+                candidate = Path(black_path_raw).expanduser().resolve()
+                if candidate.is_file():
+                    black_path = candidate
+
+        # Vercel fallback: eski akıştan gelen R2 key varsa indirip kullan.
+        if black_path is None and _on_vercel() and _r2_enabled():
+            black_path_raw = str(assets.get("black_design_path") or "").strip()
+            batch_id = str(assets.get("batch_id") or "").strip()
+            if not batch_id and black_path_raw:
+                stem = Path(black_path_raw).stem
+                if stem.endswith("_black"):
+                    batch_id = stem[: -len("_black")]
+            r2_key = str(assets.get("black_design_r2_key") or "").strip()
+            if r2_key and batch_id:
+                dl = _r2_download_workspace_design_to_tmp(
+                    r2_key, batch_id=batch_id, role="black", fallback_suffix=".webp"
+                )
+                if dl and dl.is_file():
+                    black_path = dl
+                    assets["black_design_path"] = str(dl)
+                    draft["workspace_assets"] = assets
+
+        if black_path is None or not black_path.is_file():
+            raise RuntimeError("Black design dosyası bulunamadı. Dosyayı yükleyip tekrar deneyin.")
         seo = _analyze_design_for_seo(black_path)
         draft["seo_title"] = str(seo.get("seo_title") or "").strip()[:140]
         draft["seo_tags"] = _normalize_seo_tags(seo.get("seo_tags"))
@@ -1909,6 +1994,14 @@ def workspace_analyze_design(
                 "workspace_draft": draft_err if isinstance(draft_err, dict) else None,
             }
         )
+    finally:
+        # Analiz için o anda yüklenen dosyayı kalıcı tutma.
+        if temp_uploaded_path is not None:
+            try:
+                if temp_uploaded_path.exists():
+                    temp_uploaded_path.unlink()
+            except Exception:
+                pass
 
 
 @app.post("/workspace/publish", response_class=HTMLResponse)
@@ -2118,8 +2211,16 @@ async def workspace_generate_mockups(
         assets = d_assets if isinstance(d_assets, dict) else {}
         assets["mockup_images"] = urls
         assets["active_source"] = "mockups"
+        assets["batch_id"] = batch_id
         assets["black_design_path"] = str(black_design_path)
         assets["white_design_path"] = str(white_design_path)
+        if _on_vercel() and _r2_enabled():
+            bkey = _r2_upload_workspace_design(batch_id, "black", black_design_path)
+            wkey = _r2_upload_workspace_design(batch_id, "white", white_design_path)
+            if bkey:
+                assets["black_design_r2_key"] = bkey
+            if wkey:
+                assets["white_design_r2_key"] = wkey
         draft["workspace_assets"] = assets
         draft["images"] = urls
         draft = _normalize_images_only_draft(draft)

@@ -148,6 +148,7 @@
 </form>
 <form id="form-st-analyze-seo" method="post" action="/workspace/analyze-design">
   <input type="hidden" id="st_draft_json_analyze" name="draft_json" value="{{ workspace_draft_json|default('{}')|e }}" />
+  <input type="file" name="design_black_file" id="st_design_black_file_analyze" accept=".png,.jpg,.jpeg,.webp" style="display:none;" />
 </form>
 <form id="form-st-publish" method="post" action="/workspace/publish">
   <input type="hidden" id="st_draft_json_publish" name="draft_json" value="{{ workspace_draft_json|default('{}')|e }}" />
@@ -362,10 +363,18 @@
     window.stAnalyzeSeo = function (e) {
       if (e && e.preventDefault) e.preventDefault();
       stSyncDraftFromSeoInputs();
-      const hasBlack = stDraft.workspace_assets && String(stDraft.workspace_assets.black_design_path || '').trim();
-      if (!hasBlack) {
-        alert('Önce mockup üretin (black design yolu bulunamadı).');
+      const blackFile = document.getElementById('st_design_black_file');
+      const analyzeFile = document.getElementById('st_design_black_file_analyze');
+      const hasBlackPath = stDraft.workspace_assets && String(stDraft.workspace_assets.black_design_path || '').trim();
+      const hasBlackUpload = !!(blackFile && blackFile.files && blackFile.files.length);
+      if (!hasBlackUpload && !hasBlackPath) {
+        alert('Black design dosyasını yükleyin.');
         return false;
+      }
+      if (hasBlackUpload && analyzeFile) {
+        const dt = new DataTransfer();
+        dt.items.add(blackFile.files[0]);
+        analyzeFile.files = dt.files;
       }
       document.getElementById('st_draft_json_analyze').value = JSON.stringify(stDraft);
       document.getElementById('form-st-analyze-seo').submit();
