@@ -1602,6 +1602,9 @@ def _workspace_draft_json_for_page(draft: dict[str, Any]) -> str:
             "active_source": active,
             "black_design_path": black_design_path,
             "white_design_path": white_design_path,
+            "black_design_r2_key": str(wa.get("black_design_r2_key") or "").strip(),
+            "white_design_r2_key": str(wa.get("white_design_r2_key") or "").strip(),
+            "batch_id": str(wa.get("batch_id") or "").strip(),
         },
         "variations": draft.get("variations") if isinstance(draft.get("variations"), list) else [],
         "keywords": draft.get("keywords") if isinstance(draft.get("keywords"), list) else [],
@@ -2125,8 +2128,8 @@ def workspace_publish(
 @app.post("/workspace/generate-mockups", response_class=HTMLResponse)
 async def workspace_generate_mockups(
     request: Request,
-    design_white_file: UploadFile = File(...),
-    design_black_file: UploadFile = File(...),
+    design_white_file: Optional[UploadFile] = File(None),
+    design_black_file: Optional[UploadFile] = File(None),
     draft_json: str = Form("{}"),
     workspace_url: str = Form(""),
     selected_template_urls: str = Form("[]"),
@@ -2146,15 +2149,57 @@ async def workspace_generate_mockups(
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         batch_id = f"web_{stamp}_{uuid4().hex[:8]}"
+        d_assets = draft.get("workspace_assets")
+        assets = d_assets if isinstance(d_assets, dict) else {}
+
+        def _has_upload(u: Optional[UploadFile]) -> bool:
+            return bool(u is not None and (u.filename or "").strip())
+
         # Etsy/Mockup mantığı:
         # - Açık (light) template'lere siyah design basılır -> dark_design_path
         # - Koyu (dark) template'lere beyaz design basılır -> light_design_path
-        white_design_path = await _save_uploaded_design_file(
-            design_white_file, batch_id=batch_id, role="white"
-        )
-        black_design_path = await _save_uploaded_design_file(
-            design_black_file, batch_id=batch_id, role="black"
-        )
+        white_uploaded = _has_upload(design_white_file)
+        black_uploaded = _has_upload(design_black_file)
+
+        if white_uploaded:
+            white_design_path = await _save_uploaded_design_file(
+                design_white_file, batch_id=batch_id, role="white"
+            )
+        else:
+            white_design_path = None
+            prev_white = str(assets.get("white_design_path") or "").strip()
+            if prev_white:
+                cand = Path(prev_white).expanduser().resolve()
+                if cand.is_file():
+                    white_design_path = cand
+            if white_design_path is None and _on_vercel() and _r2_enabled():
+                prev_white_key = str(assets.get("white_design_r2_key") or "").strip()
+                if prev_white_key:
+                    white_design_path = _r2_download_workspace_design_to_tmp(
+                        prev_white_key, batch_id=batch_id, role="white", fallback_suffix=".webp"
+                    )
+            if white_design_path is None or not white_design_path.is_file():
+                raise RuntimeError("White design dosyası bulunamadı. Yükleyip tekrar deneyin.")
+
+        if black_uploaded:
+            black_design_path = await _save_uploaded_design_file(
+                design_black_file, batch_id=batch_id, role="black"
+            )
+        else:
+            black_design_path = None
+            prev_black = str(assets.get("black_design_path") or "").strip()
+            if prev_black:
+                cand = Path(prev_black).expanduser().resolve()
+                if cand.is_file():
+                    black_design_path = cand
+            if black_design_path is None and _on_vercel() and _r2_enabled():
+                prev_black_key = str(assets.get("black_design_r2_key") or "").strip()
+                if prev_black_key:
+                    black_design_path = _r2_download_workspace_design_to_tmp(
+                        prev_black_key, batch_id=batch_id, role="black", fallback_suffix=".webp"
+                    )
+            if black_design_path is None or not black_design_path.is_file():
+                raise RuntimeError("Black design dosyası bulunamadı. Yükleyip tekrar deneyin.")
 
         out_root = (WORKSPACE_MOCKUPS_ROOT / batch_id).resolve()
         run_root = root
@@ -2207,16 +2252,22 @@ async def workspace_generate_mockups(
         if not urls:
             raise RuntimeError("Mockup görselleri URL'e dönüştürülemedi.")
 
-        d_assets = draft.get("workspace_assets")
-        assets = d_assets if isinstance(d_assets, dict) else {}
         assets["mockup_images"] = urls
         assets["active_source"] = "mockups"
         assets["batch_id"] = batch_id
         assets["black_design_path"] = str(black_design_path)
         assets["white_design_path"] = str(white_design_path)
         if _on_vercel() and _r2_enabled():
-            bkey = _r2_upload_workspace_design(batch_id, "black", black_design_path)
-            wkey = _r2_upload_workspace_design(batch_id, "white", white_design_path)
+            bkey = (
+                _r2_upload_workspace_design(batch_id, "black", black_design_path)
+                if black_uploaded
+                else str(assets.get("black_design_r2_key") or "").strip()
+            )
+            wkey = (
+                _r2_upload_workspace_design(batch_id, "white", white_design_path)
+                if white_uploaded
+                else str(assets.get("white_design_r2_key") or "").strip()
+            )
             if bkey:
                 assets["black_design_r2_key"] = bkey
             if wkey:
