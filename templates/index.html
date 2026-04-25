@@ -1,649 +1,516 @@
 {% extends "base.html" %}
-{% block title %}Etsy Lab — Görseller → Draft{% endblock %}
+{% block title %}Etsy Lab — Mockup -> Etsy{% endblock %}
 {% block topbar %}
 <header class="topbar">
   <div>
-    <h1>Görseller → Etsy draft</h1>
-    <div class="topbar-meta">{{ etsy_shop_name }} · Başlık/açıklama Etsy’de düzenlenecek (yer tutucu gönderilir).</div>
+    <h1>Mockup → Etsy</h1>
+    <div class="topbar-meta">{{ etsy_shop_name }} · Mockup uretimi, SEO analizi ve Etsy draft akisi.</div>
   </div>
 </header>
 {% endblock %}
 {% block content %}
-          {% if error %}<div class="alert alert-error"><strong>Hata.</strong> {{ error }}</div>{% endif %}
-          {% if status %}<div class="alert alert-success"><strong>Tamam.</strong> {{ status }}</div>{% endif %}
-          {% if warning %}<div class="alert alert-warning"><strong>Uyarı.</strong> {{ warning }}</div>{% endif %}
+{% if error %}<div class="alert alert-error"><strong>Hata.</strong> {{ error }}</div>{% endif %}
+{% if status %}<div class="alert alert-success"><strong>Tamam.</strong> {{ status }}</div>{% endif %}
+{% if warning %}<div class="alert alert-warning"><strong>Uyarı.</strong> {{ warning }}</div>{% endif %}
+{% if mockup_library_note %}
+<div class="alert alert-warning" style="margin:10px 0 14px;"><strong>Mockup kütüphanesi boş.</strong> {{ mockup_library_note|e }}</div>
+{% endif %}
+<p class="hint" style="margin:0 0 12px;font-size:0.78rem;line-height:1.45;">
+  {% if vercel_runtime %}Ortam: <strong>Vercel</strong> · {% endif %}
+  R2: {% if r2_active %}<strong>açık</strong>{% else %}<strong>kapalı</strong> (S3_BUCKET, S3_ENDPOINT, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY){% endif %}
+  · S3_PREFIX: <code>{{ s3_prefix_label|e }}</code>
+  {% if r2_active %}· Kütüphanede <strong>{{ mockup_catalog_image_count }}</strong> şablon görseli{% endif %}
+</p>
 
-          <div class="ws-page">
-            <div class="ws-toolbar">
-              <form id="ws-scrape-form" class="ws-search-box" method="post" action="/workspace/scrape" style="flex:1;margin:0;">
-                <span aria-hidden="true">🔍</span>
-                <input type="url" name="url" value="{{ workspace_url }}" placeholder="Amazon ürün URL…" required />
-                <button type="submit" class="btn btn-secondary" style="padding:6px 12px;font-size:0.8rem;">Yükle</button>
-              </form>
-              <label class="check-row" style="margin:0;">
-                <input type="checkbox" name="no_playwright" form="ws-scrape-form" />
-                <span>HTTP only (çoğu zaman boş — önerilmez)</span>
-              </label>
-            </div>
-            <p class="hint" style="margin-bottom:16px;">
-              Yükleme sonrası mümkün olduğunca çok renk/varyant ASIN galerisi birleştirilir. Etsy’ye görsel yüklerken sunucu adresi için
-              <code>APP_PUBLIC_URL</code> (örn. <code>http://127.0.0.1:8000</code>) kullanılır.
-            </p>
+<div class="ws-page">
+  <p class="hint" style="margin-bottom:16px;">Design dosyalarını yükle, kütüphaneden template seç, mockup üret ve bilgisayarına indir.</p>
 
-            {% if not ws.has_draft %}
-            <div class="card">
-              <p><strong>Amazon ürün URL’sini</strong> yapıştırıp <strong>Yükle</strong>’ye basın (Playwright açık olsun; “HTTP only” genelde yetersiz).</p>
-            </div>
-            {% else %}
-            <div class="listing-strip">
-              <img id="ws-listing-thumb" class="thumb" src="{% if ws.images %}{{ ws.images[0]|amazon_display }}{% endif %}" alt="" onerror="this.style.opacity=0.3" />
-              <div class="meta">
-                <small>Görsel seti</small>
-                <h3>{{ ws.image_count }} görsel{% if ws.item_id %} · {{ ws.item_id|e }}{% endif %}</h3>
-                {% if ws.title %}
-                <div class="hint" style="margin-top:6px;"><strong>Title:</strong> {{ ws.title|e }}</div>
-                {% endif %}
-                <p class="hint" style="margin-top:8px;">
-                  {% if ws.source_url %}
-                  <a href="{{ ws.source_url|e }}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-weight:600;">Amazon kaynağı</a>
-                  {% else %}Kaynak URL yok.{% endif %}
-                </p>
-                {% if ws.keywords %}
-                <div class="hint" style="margin-top:10px;line-height:1.5;">
-                  <strong>Keywords:</strong> {{ ws.keywords|join(', ')|e }}
-                </div>
-                {% endif %}
-                {% if ws.tags %}
-                <div class="hint" style="margin-top:8px;line-height:1.5;">
-                  <strong>Etsy tags:</strong> {{ ws.tags|join(', ')|e }}
-                </div>
-                {% endif %}
-                {% if ws.variations %}
-                <div class="hint" style="margin-top:10px;line-height:1.5;">
-                  {% for v in ws.variations %}
-                  <div><strong>{{ v['name']|e }}:</strong> {{ v['values']|join(', ')|e }}</div>
-                  {% endfor %}
-                </div>
-                {% endif %}
-              </div>
-            </div>
+  <div class="ws-section">
+    <div class="ws-section-head">Mockup → Etsy</div>
+    <div class="ws-section-body">
+      <form method="post" action="/workspace/set-mockups-dir" style="margin:8px 0 10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <input
+          type="text"
+          name="mockups_dir"
+          value="{{ mockups_root_path|e }}"
+          placeholder="/Users/.../Mockups"
+          style="min-width:320px;flex:1;padding:8px 10px;border-radius:8px;border:1px solid var(--border);"
+        />
+        <button type="submit" class="btn btn-secondary">Klasoru uygula</button>
+      </form>
+      <p class="hint" style="margin:0 0 10px;">
+        Aktif Mockups klasoru: <code>{{ mockups_root_path|e }}</code>
+        {% if mockups_root_exists %}(bulundu){% else %}(bulunamadi){% endif %}
+      </p>
 
-            <form id="form-publish" method="post" action="/workspace/publish" onsubmit="return wsBuildDraft(event)">
-              <input type="hidden" name="draft_json" id="field_draft_json" value="" />
-              <input type="hidden" name="draft_json" id="field_tag_json" value="" form="form-generate-tags" />
-              <input type="hidden" name="draft_json" id="field_mockup_json" value="" form="form-generate-mockups" />
-              <input type="hidden" name="workspace_url" value="{{ workspace_url|e }}" form="form-generate-mockups" />
-              <input type="hidden" name="selected_template_urls" id="field_selected_template_urls" value="[]" form="form-generate-mockups" />
+      <div class="ws-photo-add-row">
+        <input type="file" name="design_white_file" id="st_design_white_file" accept=".png,.jpg,.jpeg,.webp" form="form-studio-generate" style="display:none;" />
+        <input type="file" name="design_black_file" id="st_design_black_file" accept=".png,.jpg,.jpeg,.webp" form="form-studio-generate" style="display:none;" />
+        <div id="st_drop_white" class="mu-tile" style="min-width:220px;max-width:260px;aspect-ratio:auto;padding:12px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:6px;cursor:pointer;background:#fff;">
+          <strong style="font-size:0.82rem;">White design</strong>
+          <span class="hint" style="text-align:center;">(koyu template icin) Drag & drop veya tikla</span>
+          <span id="st_drop_white_name" class="hint" style="font-size:0.75rem;"></span>
+        </div>
+        <div id="st_drop_black" class="mu-tile" style="min-width:220px;max-width:260px;aspect-ratio:auto;padding:12px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:6px;cursor:pointer;background:#fff;">
+          <strong style="font-size:0.82rem;">Black design</strong>
+          <span class="hint" style="text-align:center;">(acik template icin) Drag & drop veya tikla</span>
+          <span id="st_drop_black_name" class="hint" style="font-size:0.75rem;"></span>
+        </div>
+        <button type="button" class="btn btn-secondary" onclick="stGenerateMockups(event)">Mockupları üret</button>
+      </div>
 
-              <div class="ws-section">
-                <div class="ws-section-head">Görseller</div>
-                <div class="ws-section-body">
-                  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
-                    <button type="button" id="ws-tab-amazon" class="btn btn-secondary" style="padding:8px 12px;font-size:0.8rem;">Amazon</button>
-                    <button type="button" id="ws-tab-mockups" class="btn btn-secondary" style="padding:8px 12px;font-size:0.8rem;">My mockups</button>
-                  </div>
-                  <p class="hint" id="ws-photo-count" style="margin-bottom:10px;"></p>
-                  <p class="hint" style="margin-bottom:10px;">Amazon sekmesinde CDN görselleri proxy ile önizlenir; My mockups sekmesinde yerel mockup dosyaları kullanılır.</p>
-                  <div id="ws-panel-amazon">
-                    <div id="ws-photo-editor-amazon" class="ws-photo-editor" aria-label="Amazon görselleri"></div>
-                    <div class="ws-photo-add-row">
-                      <input type="url" id="ws_photo_add_url" placeholder="Amazon görsel URL…" autocomplete="off" />
-                      <button type="button" class="btn btn-secondary" id="ws_photo_add_btn">Ekle</button>
-                    </div>
-                  </div>
-                  <div id="ws-panel-mockups" style="display:none;">
-                    <div id="ws-photo-editor-mockups" class="ws-photo-editor" aria-label="Mockup görselleri"></div>
-                    <div style="margin:8px 0 12px;">
-                      <div class="ws-photo-add-row">
-                        <input type="file" name="design_white_file" id="ws_design_white_file" accept=".png,.jpg,.jpeg,.webp" form="form-generate-mockups" style="display:none;" />
-                        <input type="file" name="design_black_file" id="ws_design_black_file" accept=".png,.jpg,.jpeg,.webp" form="form-generate-mockups" style="display:none;" />
-                        <div id="ws_drop_white" class="mu-tile" style="min-width:220px;max-width:260px;aspect-ratio:auto;padding:12px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:6px;cursor:pointer;background:#fff;">
-                          <strong style="font-size:0.82rem;">White design</strong>
-                          <span class="hint" style="text-align:center;">(koyu template icin) Drag & drop veya tikla</span>
-                          <span id="ws_drop_white_name" class="hint" style="font-size:0.75rem;"></span>
-                        </div>
-                        <div id="ws_drop_black" class="mu-tile" style="min-width:220px;max-width:260px;aspect-ratio:auto;padding:12px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:6px;cursor:pointer;background:#fff;">
-                          <strong style="font-size:0.82rem;">Black design</strong>
-                          <span class="hint" style="text-align:center;">(acik template icin) Drag & drop veya tikla</span>
-                          <span id="ws_drop_black_name" class="hint" style="font-size:0.75rem;"></span>
-                        </div>
-                        <button type="button" class="btn btn-secondary" onclick="wsGenerateMockups(event)">Mockupları üret</button>
-                      </div>
-                    </div>
-                    <div class="hint" style="margin:8px 0;">Kütüphane: üretmek istediğin template'leri seç (mavi çerçeve).</div>
-                    {% if mockup_library_note %}
-                    <div class="alert alert-warning" style="margin:6px 0 10px;"><strong>Mockup kütüphanesi boş.</strong> {{ mockup_library_note|e }}</div>
-                    {% endif %}
-                    <div id="ws-mockup-lib-tabs" style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 10px;">
-                      {% for cat in mockup_categories %}
-                      <button
-                        type="button"
-                        class="btn btn-secondary ws-mockup-lib-tab{% if loop.first %} ws-mockup-lib-tab--active{% endif %}"
-                        data-category="{{ cat.title|e }}"
-                        style="padding:7px 11px;font-size:0.78rem;{% if loop.first %}background:var(--accent);color:#fff;border-color:var(--accent);{% endif %}"
-                      >
-                        {{ cat.title|e }}
-                      </button>
-                      {% endfor %}
-                    </div>
-                    <div id="ws-mockup-lib-panels">
-                      {% for cat in mockup_categories %}
-                      <div class="mu-grid ws-mockup-lib-panel" data-category="{{ cat.title|e }}" style="padding:0;{% if not loop.first %}display:none;{% endif %}">
-                        {% for img in cat.images %}
-                        <button type="button" class="mu-tile ws-mockup-pick" data-url="{{ img.url|e }}" title="{{ cat.title|e }} / {{ img.filename|e }}" style="padding:0;border:1px solid var(--border);cursor:pointer;">
-                          <img src="{{ img.url|e }}" alt="{{ img.filename|e }}" loading="lazy" />
-                        </button>
-                        {% endfor %}
-                      </div>
-                      {% endfor %}
-                    </div>
-                  </div>
-                  <p class="hint">Sürükleyerek sıra. İlk görsel kapak. Etsy’de en fazla 20 (aktif sekmeden gönderilir).</p>
-                </div>
-              </div>
+      <div class="hint" style="margin:8px 0;">Kütüphane: üretmek istediğin template'leri seç (mavi çerçeve).</div>
+      <div id="st-lib-tabs" style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 10px;">
+        {% for cat in mockup_categories %}
+        <button
+          type="button"
+          class="btn btn-secondary st-lib-tab{% if loop.first %} st-lib-tab--active{% endif %}"
+          data-category="{{ cat.title|e }}"
+          style="padding:7px 11px;font-size:0.78rem;{% if loop.first %}background:var(--accent);color:#fff;border-color:var(--accent);{% endif %}"
+        >
+          {{ cat.title|e }}
+        </button>
+        {% endfor %}
+      </div>
+      <div id="st-lib-panels">
+        {% for cat in mockup_categories %}
+        <div class="mu-grid st-lib-panel" data-category="{{ cat.title|e }}" style="padding:0;{% if not loop.first %}display:none;{% endif %}">
+          {% for img in cat.images %}
+          <button type="button" class="mu-tile st-pick-template" data-url="{{ img.url|e }}" title="{{ cat.title|e }} / {{ img.filename|e }}" style="padding:0;border:1px solid var(--border);cursor:pointer;">
+            <img src="{{ img.url|e }}" alt="{{ img.filename|e }}" loading="lazy" />
+          </button>
+          {% endfor %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
 
-              <div class="ws-section">
-                <div class="ws-section-head">Etsy</div>
-                <div class="ws-section-body">
-                  <div class="ws-row">
-                    <div class="ws-label">Tags (editable)</div>
-                    <div>
-                      <textarea id="ws_tags_editor" rows="3" placeholder="tag1, tag2, tag3" style="max-width:100%;padding:10px;border-radius:8px;border:1px solid var(--border);width:100%;font-family:inherit;font-size:0.9rem;"></textarea>
-                      <p class="hint" id="ws-tags-count" style="margin-top:8px;">0/13 tag</p>
-                    </div>
-                  </div>
-                  <div class="ws-row" style="margin-bottom:0;">
-                    <div class="ws-label">Listing ID</div>
-                    <div>
-                      <input type="text" name="etsy_update_listing_id" value="{{ workspace_listing_id }}" placeholder="Boş = yeni draft (yer tutucu metin + görseller)" style="max-width:320px;padding:10px;border-radius:8px;border:1px solid var(--border);width:100%;" />
-                      <p class="hint" style="margin-top:8px;">
-                        Yeni draft: Etsy API zorunlu alanları <code>.env</code> ile (
-                        <code>ETSY_DRAFT_PLACEHOLDER_TITLE</code>,
-                        <code>ETSY_DRAFT_PLACEHOLDER_DESCRIPTION</code>,
-                        fiyat <code>ETSY_DRAFT_PLACEHOLDER_PRICE</code> = {{ etsy_placeholder_price|e }},
-                        <code>ETSY_TAXONOMY_ID</code>, <code>ETSY_SHIPPING_PROFILE_ID</code>).
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              </div>
+  <div class="ws-section">
+    <div class="ws-section-head">Üretilen Mockuplar{% if current_batch %} · {{ current_batch|e }}{% endif %}</div>
+    <div class="ws-section-body">
+      <div id="st-generated-editor" class="ws-photo-editor" aria-label="Uretilen mockup görselleri"></div>
+      <div style="margin:8px 0 0;">
+        <button type="button" class="btn btn-secondary" onclick="stDownloadSelected(event)">İndir</button>
+      </div>
+      {% if not generated_urls %}
+      <p class="hint">Henüz üretim yapılmadı.</p>
+      {% endif %}
+    </div>
+  </div>
 
-              <div class="ws-footer-bar">
-                <button type="button" class="btn btn-secondary" onclick="wsReset()">Sıfırla</button>
-                <button type="button" class="btn btn-secondary" onclick="wsGenerateTags(event)">Tag üret</button>
-                <button type="submit" class="btn btn-primary">Etsy’ye gönder (görseller)</button>
-              </div>
-            </form>
-            <form id="form-generate-tags" method="post" action="/workspace/generate-tags"></form>
-            <form id="form-generate-mockups" method="post" action="/workspace/generate-mockups" enctype="multipart/form-data"></form>
-            <div id="ws-lightbox" class="ws-lightbox" aria-hidden="true">
-              <img id="ws-lightbox-img" alt="Mockup preview" />
-            </div>
+  <div class="ws-section">
+    <div class="ws-section-head">SEO Analizi ve Etsy Draft</div>
+    <div class="ws-section-body">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+        <button type="button" class="btn btn-secondary" onclick="stAnalyzeSeo(event)">Black design ile SEO üret</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;">
+        <label class="hint">SEO Title
+          <input id="st_seo_title" type="text" maxlength="140" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--border);" />
+        </label>
+        <label class="hint">Primary color
+          <input id="st_primary_color" type="text" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--border);" />
+        </label>
+        <label class="hint">Secondary color
+          <input id="st_secondary_color" type="text" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--border);" />
+        </label>
+        <label class="hint">Occasion
+          <input id="st_occasion" type="text" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--border);" />
+        </label>
+        <label class="hint">Holiday
+          <input id="st_holiday" type="text" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--border);" />
+        </label>
+        <label class="hint">Graphic
+          <input id="st_graphic" type="text" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--border);" />
+        </label>
+      </div>
+      <label class="hint" style="display:block;margin-top:10px;">SEO Tags (13 adet, virgülle)
+        <textarea id="st_seo_tags" rows="2" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--border);"></textarea>
+      </label>
+      <label class="hint" style="display:block;margin-top:10px;">Mevcut Etsy listing ID (opsiyonel update)
+        <input id="st_etsy_update_listing_id" type="text" inputmode="numeric" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--border);" />
+      </label>
+      <div style="margin-top:12px;">
+        <button type="button" class="btn btn-primary" onclick="stPublishEtsy(event)">Seçili mockuplarla Etsy draft oluştur</button>
+      </div>
+    </div>
+  </div>
+</div>
 
-            <script type="application/json" id="draft-seed">{{ workspace_draft_json | safe }}</script>
-            <script>
-              (function () {
-                const seedEl = document.getElementById('draft-seed');
-                const PLACEHOLDER_IMG = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2280%22 height=%2280%22%3E%3Crect fill=%22%23e5e7eb%22 width=%2280%22 height=%2280%22/%3E%3C/svg%3E';
-                const lightboxEl = document.getElementById('ws-lightbox');
-                const lightboxImgEl = document.getElementById('ws-lightbox-img');
-                let lightboxUrl = '';
-                const SOURCE_AMAZON = 'amazon';
-                const SOURCE_MOCKUPS = 'mockups';
-                let activeSource = '{{ ws.active_source|default("amazon") }}';
-                if (activeSource !== SOURCE_MOCKUPS) activeSource = SOURCE_AMAZON;
-                function wsIsAmazonUrl(u) {
-                  if (typeof u !== 'string') return false;
-                  const s = u.trim();
-                  if (!s) return false;
-                  return s.indexOf('/media/mockups/') !== 0 && s.indexOf('/media/workspace-mockups/') !== 0
-                    && s.indexOf('/media/workspace-r2/') !== 0;
-                }
-                function wsIsMockupUrl(u) {
-                  if (typeof u !== 'string') return false;
-                  const s = u.trim();
-                  return s.indexOf('/media/mockups/') === 0 || s.indexOf('/media/workspace-mockups/') === 0
-                    || s.indexOf('/media/workspace-r2/') === 0;
-                }
-                function wsDisplaySrc(raw) {
-                  var u = (raw || '').trim();
-                  if (!u) return '';
-                  if (u.startsWith('https://') && u.indexOf('amazon.com/images/I/') !== -1) {
-                    return '/media/amazon-image?u=' + encodeURIComponent(u);
-                  }
-                  return u;
-                }
-                function wsCloseLightbox() {
-                  if (!lightboxEl) return;
-                  lightboxEl.classList.remove('is-open');
-                  lightboxEl.setAttribute('aria-hidden', 'true');
-                  lightboxUrl = '';
-                }
-                function wsOpenLightbox(rawUrl) {
-                  if (!lightboxEl || !lightboxImgEl) return;
-                  var display = wsDisplaySrc(rawUrl);
-                  if (!display) return;
-                  if (lightboxEl.classList.contains('is-open') && lightboxUrl === rawUrl) {
-                    wsCloseLightbox();
-                    return;
-                  }
-                  lightboxUrl = rawUrl;
-                  lightboxImgEl.src = display;
-                  lightboxEl.classList.add('is-open');
-                  lightboxEl.setAttribute('aria-hidden', 'false');
-                }
-                function wsReadSeed() {
-                  try {
-                    return JSON.parse((seedEl.textContent || '').trim() || '{}');
-                  } catch (e) {
-                    console.warn('draft-seed JSON okunamadı', e);
-                    return {};
-                  }
-                }
-                function wsUrlsFromPhotoEditorDom(editorId, predicate) {
-                  const out = [];
-                  const box = document.getElementById(editorId);
-                  if (!box) return out;
-                  box.querySelectorAll('.ws-photo-tile').forEach(function (t) {
-                    const u = t.getAttribute('data-url');
-                    if (u && u.trim() && predicate(u.trim())) out.push(u.trim());
-                  });
-                  return out;
-                }
-                function wsGetPhotoUrls(source) {
-                  const src = source || activeSource;
-                  const out = [];
-                  const editorId = src === SOURCE_MOCKUPS ? '#ws-photo-editor-mockups' : '#ws-photo-editor-amazon';
-                  document.querySelectorAll(editorId + ' .ws-photo-tile').forEach(function (t) {
-                    const u = t.getAttribute('data-url');
-                    if (!u || !u.trim()) return;
-                    const v = u.trim();
-                    if (src === SOURCE_MOCKUPS ? wsIsMockupUrl(v) : wsIsAmazonUrl(v)) out.push(v);
-                  });
-                  return out;
-                }
-                function wsRefreshListingThumb() {
-                  const thumb = document.getElementById('ws-listing-thumb');
-                  const urls = wsGetPhotoUrls(activeSource);
-                  if (thumb) thumb.src = wsDisplaySrc(urls[0] || '');
-                }
-                function wsUpdatePhotoCount() {
-                  const el = document.getElementById('ws-photo-count');
-                  const n = wsGetPhotoUrls(activeSource).length;
-                  const label = activeSource === SOURCE_MOCKUPS ? 'My mockups' : 'Amazon';
-                  if (el) el.textContent = n ? (label + ': ' + n + ' görsel') : (label + ': Görsel yok');
-                }
-                function wsMakePhotoTile(url) {
-                  const tile = document.createElement('div');
-                  tile.className = 'ws-photo-tile';
-                  tile.setAttribute('draggable', 'true');
-                  tile.setAttribute('data-url', url);
-                  const handle = document.createElement('span');
-                  handle.className = 'ws-photo-handle';
-                  handle.setAttribute('aria-hidden', 'true');
-                  handle.textContent = '↕';
-                  const rm = document.createElement('button');
-                  rm.type = 'button';
-                  rm.className = 'ws-photo-remove';
-                  rm.setAttribute('aria-label', 'Kaldır');
-                  rm.textContent = '×';
-                  const img = document.createElement('img');
-                  img.src = wsDisplaySrc(url);
-                  img.alt = '';
-                  img.loading = 'lazy';
-                  img.draggable = false;
-                  img.onerror = function () { img.onerror = null; img.src = PLACEHOLDER_IMG; };
-                  tile.appendChild(handle);
-                  tile.appendChild(rm);
-                  tile.appendChild(img);
-                  return tile;
-                }
-                function wsBindPhotoDragDrop(container) {
-                  if (!container || container.dataset.dragBound === '1') return;
-                  container.dataset.dragBound = '1';
-                  let dragPhotoEl = null;
-                  container.addEventListener('dragstart', function (e) {
-                    const tile = e.target.closest('.ws-photo-tile');
-                    if (!tile || !container.contains(tile)) return;
-                    if (e.target.closest && e.target.closest('.ws-photo-remove')) { e.preventDefault(); return; }
-                    dragPhotoEl = tile;
-                    tile.classList.add('ws-photo-tile--dragging');
-                    e.dataTransfer.effectAllowed = 'move';
-                    try { e.dataTransfer.setData('text/plain', 'move'); } catch (err) {}
-                  });
-                  container.addEventListener('dragend', function () {
-                    if (dragPhotoEl) dragPhotoEl.classList.remove('ws-photo-tile--dragging');
-                    dragPhotoEl = null;
-                  });
-                  container.addEventListener('dragover', function (e) {
-                    e.preventDefault();
-                    const over = e.target.closest('.ws-photo-tile');
-                    if (!over || !container.contains(over) || over === dragPhotoEl) return;
-                    e.dataTransfer.dropEffect = 'move';
-                  });
-                  container.addEventListener('drop', function (e) {
-                    e.preventDefault();
-                    const target = e.target.closest('.ws-photo-tile');
-                    if (!dragPhotoEl || !target || !container.contains(target) || dragPhotoEl === target) return;
-                    const rect = target.getBoundingClientRect();
-                    const before = e.clientX < rect.left + rect.width / 2;
-                    if (before) container.insertBefore(dragPhotoEl, target);
-                    else container.insertBefore(dragPhotoEl, target.nextSibling);
-                    wsRefreshListingThumb();
-                    wsUpdatePhotoCount();
-                  });
-                }
-                function wsRebuildPhotoEditor(editorId, urls, predicate) {
-                  const box = document.getElementById(editorId);
-                  if (!box) return;
-                  box.innerHTML = '';
-                  urls.forEach(function (u) {
-                    if (predicate(u)) box.appendChild(wsMakePhotoTile(u.trim()));
-                  });
-                }
-                function wsRenderPhotosFromSeed() {
-                  const s = wsReadSeed();
-                  const assets = s.workspace_assets && typeof s.workspace_assets === 'object' ? s.workspace_assets : {};
-                  let aUrls = Array.isArray(assets.amazon_images)
-                    ? assets.amazon_images.slice()
-                    : (Array.isArray(s.images) ? s.images.slice() : []);
-                  aUrls = aUrls.filter(wsIsAmazonUrl).map(function (u) { return u.trim(); });
-                  let mUrls = Array.isArray(assets.mockup_images) ? assets.mockup_images.slice() : [];
-                  mUrls = mUrls.filter(wsIsMockupUrl).map(function (u) { return u.trim(); });
-                  if (!aUrls.length) {
-                    aUrls = wsUrlsFromPhotoEditorDom('ws-photo-editor-amazon', wsIsAmazonUrl);
-                  }
-                  if (!mUrls.length) {
-                    mUrls = wsUrlsFromPhotoEditorDom('ws-photo-editor-mockups', wsIsMockupUrl);
-                  }
-                  wsRebuildPhotoEditor('ws-photo-editor-amazon', aUrls, wsIsAmazonUrl);
-                  wsRebuildPhotoEditor('ws-photo-editor-mockups', mUrls, wsIsMockupUrl);
-                }
-                function wsSwitchTab(source) {
-                  activeSource = source === SOURCE_MOCKUPS ? SOURCE_MOCKUPS : SOURCE_AMAZON;
-                  const pa = document.getElementById('ws-panel-amazon');
-                  const pm = document.getElementById('ws-panel-mockups');
-                  const ba = document.getElementById('ws-tab-amazon');
-                  const bm = document.getElementById('ws-tab-mockups');
-                  if (pa) pa.style.display = activeSource === SOURCE_AMAZON ? '' : 'none';
-                  if (pm) pm.style.display = activeSource === SOURCE_MOCKUPS ? '' : 'none';
-                  if (ba) ba.style.background = activeSource === SOURCE_AMAZON ? 'var(--accent)' : '';
-                  if (ba) ba.style.color = activeSource === SOURCE_AMAZON ? '#fff' : '';
-                  if (bm) bm.style.background = activeSource === SOURCE_MOCKUPS ? 'var(--accent)' : '';
-                  if (bm) bm.style.color = activeSource === SOURCE_MOCKUPS ? '#fff' : '';
-                  wsRefreshListingThumb();
-                  wsUpdatePhotoCount();
-                }
-                function wsBuildDraftObject() {
-                  var d = {};
-                  try { d = JSON.parse(seedEl.textContent); } catch (err) { d = {}; }
-                  var amazonUrls = wsGetPhotoUrls(SOURCE_AMAZON);
-                  var mockupUrls = wsGetPhotoUrls(SOURCE_MOCKUPS);
-                  var tagsEditor = document.getElementById('ws_tags_editor');
-                  var tagsRaw = tagsEditor ? (tagsEditor.value || '') : '';
-                  var tags = tagsRaw
-                    .split(',')
-                    .map(function (x) { return (x || '').trim().toLowerCase(); })
-                    .filter(function (x) { return x.length > 0; });
-                  var uniq = [];
-                  tags.forEach(function (t) {
-                    if (uniq.indexOf(t) !== -1) return;
-                    uniq.push(t.length > 20 ? t.slice(0, 20).trim() : t);
-                  });
-                  tags = uniq.slice(0, 13);
-                  d.workspace_assets = d.workspace_assets && typeof d.workspace_assets === 'object' ? d.workspace_assets : {};
-                  d.workspace_assets.amazon_images = amazonUrls.slice();
-                  d.workspace_assets.mockup_images = mockupUrls.slice();
-                  d.workspace_assets.active_source = activeSource;
-                  d.images = activeSource === SOURCE_MOCKUPS ? mockupUrls.slice() : amazonUrls.slice();
-                  if (!Array.isArray(d.keywords)) d.keywords = [];
-                  d.tags = tags;
-                  if (!Array.isArray(d.variations)) d.variations = [];
-                  if (d.workspace_meta) delete d.workspace_meta;
-                  return d;
-                }
-                window.wsBuildDraft = function (e) {
-                  e.preventDefault();
-                  document.getElementById('field_draft_json').value = JSON.stringify(wsBuildDraftObject());
-                  document.getElementById('form-publish').submit();
-                  return false;
-                };
-                window.wsReset = function () {
-                  try {
-                    wsRenderPhotosFromSeed();
-                    wsSwitchTab('{{ ws.active_source|default("amazon") }}');
-                  } catch (err) {}
-                };
-                window.wsGenerateTags = function (e) {
-                  if (e && e.preventDefault) e.preventDefault();
-                  document.getElementById('field_tag_json').value = JSON.stringify(wsBuildDraftObject());
-                  document.getElementById('form-generate-tags').submit();
-                  return false;
-                };
-                async function wsOptimizeUploadFile(file, role) {
-                  const MAX_SIDE = 3400;
-                  const TARGET_MAX_BYTES = 2 * 1024 * 1024;
-                  if (!file) return null;
-                  if (file.size <= TARGET_MAX_BYTES) return file;
-                  let bmp;
-                  try {
-                    bmp = await createImageBitmap(file);
-                  } catch (err) {
-                    return file;
-                  }
-                  const ow = bmp.width || 1;
-                  const oh = bmp.height || 1;
-                  const scale = Math.min(1, MAX_SIDE / Math.max(ow, oh));
-                  const nw = Math.max(1, Math.round(ow * scale));
-                  const nh = Math.max(1, Math.round(oh * scale));
-                  const canvas = document.createElement('canvas');
-                  canvas.width = nw;
-                  canvas.height = nh;
-                  const ctx = canvas.getContext('2d', { alpha: true });
-                  if (!ctx) return file;
-                  ctx.imageSmoothingEnabled = true;
-                  ctx.imageSmoothingQuality = 'high';
-                  ctx.drawImage(bmp, 0, 0, nw, nh);
-                  const tries = [0.95, 0.9, 0.85, 0.8, 0.75, 0.7];
-                  for (let i = 0; i < tries.length; i += 1) {
-                    const q = tries[i];
-                    const blob = await new Promise(function(resolve){
-                      canvas.toBlob(resolve, 'image/webp', q);
-                    });
-                    if (!blob) continue;
-                    if (blob.size <= TARGET_MAX_BYTES || i === tries.length - 1) {
-                      const nameBase = (file.name || role || 'design').replace(/\.[^.]+$/, '');
-                      return new File([blob], nameBase + '.webp', { type: 'image/webp' });
-                    }
-                  }
-                  return file;
-                }
-                window.wsGenerateMockups = async function (e) {
-                  if (e && e.preventDefault) e.preventDefault();
-                  const whiteFile = document.getElementById('ws_design_white_file');
-                  const blackFile = document.getElementById('ws_design_black_file');
-                  if (!whiteFile || !blackFile) return false;
-                  if (!whiteFile.files || !whiteFile.files.length) {
-                    alert('White design dosyasını seçin.');
-                    return false;
-                  }
-                  if (!blackFile.files || !blackFile.files.length) {
-                    alert('Black design dosyasını seçin.');
-                    return false;
-                  }
-                  const selected = [];
-                  document.querySelectorAll('.ws-mockup-pick.ws-mockup-pick--selected').forEach(function(btn){
-                    const u = (btn.getAttribute('data-url') || '').trim();
-                    if (u) selected.push(u);
-                  });
-                  if (!selected.length) {
-                    alert('Lutfen en az bir mockup template secin.');
-                    return false;
-                  }
-                  const optWhite = await wsOptimizeUploadFile(whiteFile.files[0], 'white');
-                  const optBlack = await wsOptimizeUploadFile(blackFile.files[0], 'black');
-                  if (!optWhite || !optBlack) {
-                    alert('Design dosyaları hazırlanırken bir hata oluştu.');
-                    return false;
-                  }
-                  if ((optWhite.size + optBlack.size) > (4 * 1024 * 1024)) {
-                    alert('Dosyalar hala çok büyük. Biraz daha küçük design yüklemeyi deneyin.');
-                    return false;
-                  }
-                  const dtW = new DataTransfer();
-                  dtW.items.add(optWhite);
-                  whiteFile.files = dtW.files;
-                  const dtB = new DataTransfer();
-                  dtB.items.add(optBlack);
-                  blackFile.files = dtB.files;
-                  document.getElementById('field_selected_template_urls').value = JSON.stringify(selected);
-                  document.getElementById('field_mockup_json').value = JSON.stringify(wsBuildDraftObject());
-                  document.getElementById('form-generate-mockups').submit();
-                  return false;
-                };
-                function wsBindDropZone(zoneId, inputId, labelId) {
-                  const zone = document.getElementById(zoneId);
-                  const input = document.getElementById(inputId);
-                  const nameEl = document.getElementById(labelId);
-                  if (!zone || !input) return;
-                  function setFile(file) {
-                    if (!file) return;
-                    const dt = new DataTransfer();
-                    dt.items.add(file);
-                    input.files = dt.files;
-                    if (nameEl) nameEl.textContent = file.name;
-                  }
-                  zone.addEventListener('click', function () { input.click(); });
-                  input.addEventListener('change', function () {
-                    if (input.files && input.files.length && nameEl) nameEl.textContent = input.files[0].name;
-                  });
-                  ['dragenter', 'dragover'].forEach(function(evt){
-                    zone.addEventListener(evt, function(ev){
-                      ev.preventDefault();
-                      zone.style.borderColor = 'var(--accent)';
-                      zone.style.background = '#eef2ff';
-                    });
-                  });
-                  ['dragleave', 'drop'].forEach(function(evt){
-                    zone.addEventListener(evt, function(ev){
-                      ev.preventDefault();
-                      zone.style.borderColor = '';
-                      zone.style.background = '#fff';
-                    });
-                  });
-                  zone.addEventListener('drop', function (ev) {
-                    const files = ev.dataTransfer && ev.dataTransfer.files;
-                    if (!files || !files.length) return;
-                    setFile(files[0]);
-                  });
-                }
-                const amazonBox = document.getElementById('ws-photo-editor-amazon');
-                const mockupBox = document.getElementById('ws-photo-editor-mockups');
-                [amazonBox, mockupBox].forEach(function(photoBox) {
-                  if (!photoBox) return;
-                  wsBindPhotoDragDrop(photoBox);
-                  photoBox.addEventListener('click', function (ev) {
-                    const btn = ev.target.closest('.ws-photo-remove');
-                    if (!btn || !photoBox.contains(btn)) return;
-                    const tile = btn.closest('.ws-photo-tile');
-                    if (tile) { tile.remove(); wsRefreshListingThumb(); wsUpdatePhotoCount(); }
-                  });
-                });
-                if (mockupBox) {
-                  mockupBox.addEventListener('click', function (ev) {
-                    if (ev.target.closest('.ws-photo-remove')) return;
-                    const tile = ev.target.closest('.ws-photo-tile');
-                    if (!tile || !mockupBox.contains(tile)) return;
-                    const u = (tile.getAttribute('data-url') || '').trim();
-                    if (!u) return;
-                    wsOpenLightbox(u);
-                  });
-                }
-                if (lightboxEl) {
-                  lightboxEl.addEventListener('click', function () { wsCloseLightbox(); });
-                }
-                document.addEventListener('keydown', function (ev) {
-                  if (ev.key === 'Escape') wsCloseLightbox();
-                });
-                const addPhotoBtn = document.getElementById('ws_photo_add_btn');
-                const addPhotoInp = document.getElementById('ws_photo_add_url');
-                if (addPhotoBtn && addPhotoInp && amazonBox) {
-                  addPhotoBtn.addEventListener('click', function () {
-                    var u = (addPhotoInp.value || '').trim();
-                    if (!u || !wsIsAmazonUrl(u)) return;
-                    amazonBox.appendChild(wsMakePhotoTile(u));
-                    addPhotoInp.value = '';
-                    wsRefreshListingThumb();
-                    wsUpdatePhotoCount();
-                  });
-                }
-                document.querySelectorAll('.ws-mockup-pick').forEach(function(btn) {
-                  btn.addEventListener('click', function() {
-                    const u = (btn.getAttribute('data-url') || '').trim();
-                    if (!u || !wsIsMockupUrl(u)) return;
-                    btn.classList.toggle('ws-mockup-pick--selected');
-                    if (btn.classList.contains('ws-mockup-pick--selected')) {
-                      btn.style.outline = '2px solid var(--accent)';
-                      btn.style.outlineOffset = '2px';
-                    } else {
-                      btn.style.outline = '';
-                      btn.style.outlineOffset = '';
-                    }
-                  });
-                });
-                (function wsInitMockupLibraryTabs() {
-                  const tabs = Array.from(document.querySelectorAll('.ws-mockup-lib-tab'));
-                  const panels = Array.from(document.querySelectorAll('.ws-mockup-lib-panel'));
-                  if (!tabs.length || !panels.length) return;
-                  function setActive(cat) {
-                    tabs.forEach(function (t) {
-                      const on = (t.getAttribute('data-category') || '') === cat;
-                      t.classList.toggle('ws-mockup-lib-tab--active', on);
-                      t.style.background = on ? 'var(--accent)' : '';
-                      t.style.color = on ? '#fff' : '';
-                      t.style.borderColor = on ? 'var(--accent)' : '';
-                    });
-                    panels.forEach(function (p) {
-                      const on = (p.getAttribute('data-category') || '') === cat;
-                      p.style.display = on ? 'grid' : 'none';
-                    });
-                  }
-                  tabs.forEach(function (t) {
-                    t.addEventListener('click', function () {
-                      setActive((t.getAttribute('data-category') || '').trim());
-                    });
-                  });
-                })();
-                const tabA = document.getElementById('ws-tab-amazon');
-                const tabM = document.getElementById('ws-tab-mockups');
-                if (tabA) tabA.addEventListener('click', function(){ wsSwitchTab(SOURCE_AMAZON); });
-                if (tabM) tabM.addEventListener('click', function(){ wsSwitchTab(SOURCE_MOCKUPS); });
-                wsBindDropZone('ws_drop_white', 'ws_design_white_file', 'ws_drop_white_name');
-                wsBindDropZone('ws_drop_black', 'ws_design_black_file', 'ws_drop_black_name');
-                (function wsInitTagsEditor() {
-                  const tagsEl = document.getElementById('ws_tags_editor');
-                  const countEl = document.getElementById('ws-tags-count');
-                  if (!tagsEl) return;
-                  const s = wsReadSeed();
-                  const raw = Array.isArray(s.tags) ? s.tags : [];
-                  const tags = raw.map(function (x) { return (x || '').toString().trim(); }).filter(Boolean).slice(0, 13);
-                  tagsEl.value = tags.join(', ');
-                  function refreshCount() {
-                    const parsed = (tagsEl.value || '')
-                      .split(',')
-                      .map(function (x) { return (x || '').trim(); })
-                      .filter(Boolean);
-                    const uniq = [];
-                    parsed.forEach(function (t) { if (uniq.indexOf(t) === -1) uniq.push(t); });
-                    if (countEl) countEl.textContent = uniq.slice(0, 13).length + '/13 tag';
-                  }
-                  tagsEl.addEventListener('input', refreshCount);
-                  refreshCount();
-                })();
-                wsRenderPhotosFromSeed();
-                wsSwitchTab(activeSource);
-              })();
-            </script>
-            {% endif %}
-          </div>
+<form id="form-studio-generate" method="post" action="/workspace/generate-mockups" enctype="multipart/form-data">
+  <input type="hidden" id="st_draft_json_generate" name="draft_json" value="{{ workspace_draft_json|default('{}')|e }}" />
+  <input type="hidden" name="workspace_url" value="" />
+  <input type="hidden" name="selected_template_urls" id="st_selected_template_urls" value="[]" />
+</form>
+<form id="form-studio-download-selected" method="post" action="/workspace/download-selected-mockups">
+  <input type="hidden" name="selected_urls" id="st_selected_generated_urls" value="[]" />
+</form>
+<form id="form-st-analyze-seo" method="post" action="/workspace/analyze-design">
+  <input type="hidden" id="st_draft_json_analyze" name="draft_json" value="{{ workspace_draft_json|default('{}')|e }}" />
+</form>
+<form id="form-st-publish" method="post" action="/workspace/publish">
+  <input type="hidden" id="st_draft_json_publish" name="draft_json" value="{{ workspace_draft_json|default('{}')|e }}" />
+  <input type="hidden" id="st_selected_mockup_urls_publish" name="selected_mockup_urls" value="[]" />
+  <input type="hidden" id="st_etsy_update_listing_id_hidden" name="etsy_update_listing_id" value="" />
+</form>
+
+<div id="st-lightbox" class="ws-lightbox" aria-hidden="true">
+  <img id="st-lightbox-img" alt="Mockup preview" />
+</div>
+
+<script type="application/json" id="st-generated-seed">{{ generated_urls | tojson }}</script>
+<script type="application/json" id="st-draft-seed">{{ workspace_draft_json|default('{}')|safe }}</script>
+<script>
+  (function () {
+    const PLACEHOLDER_IMG = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2280%22 height=%2280%22%3E%3Crect fill=%22%23e5e7eb%22 width=%2280%22 height=%2280%22/%3E%3C/svg%3E';
+    const generatedSeedEl = document.getElementById('st-generated-seed');
+    const draftSeedEl = document.getElementById('st-draft-seed');
+    const lightboxEl = document.getElementById('st-lightbox');
+    const lightboxImgEl = document.getElementById('st-lightbox-img');
+    let lightboxUrl = '';
+    let stDraft = {};
+    try {
+      stDraft = JSON.parse((draftSeedEl && draftSeedEl.textContent) ? draftSeedEl.textContent : '{}') || {};
+    } catch (e) {
+      stDraft = {};
+    }
+
+    function stDisplaySrc(raw) {
+      return (raw || '').trim();
+    }
+    function stIsMockupUrl(u) {
+      const s = (u || '').trim();
+      return s.indexOf('/media/mockups/') === 0 || s.indexOf('/media/workspace-mockups/') === 0
+        || s.indexOf('/media/workspace-r2/') === 0;
+    }
+    function stOpenLightbox(url) {
+      const display = stDisplaySrc(url);
+      if (!display || !lightboxEl || !lightboxImgEl) return;
+      if (lightboxEl.classList.contains('is-open') && lightboxUrl === url) {
+        stCloseLightbox();
+        return;
+      }
+      lightboxUrl = url;
+      lightboxImgEl.src = display;
+      lightboxEl.classList.add('is-open');
+      lightboxEl.setAttribute('aria-hidden', 'false');
+    }
+    function stCloseLightbox() {
+      if (!lightboxEl) return;
+      lightboxEl.classList.remove('is-open');
+      lightboxEl.setAttribute('aria-hidden', 'true');
+      lightboxUrl = '';
+    }
+    function stMakeGeneratedTile(url) {
+      const tile = document.createElement('div');
+      tile.className = 'ws-photo-tile';
+      tile.setAttribute('data-url', url);
+      const pick = document.createElement('button');
+      pick.type = 'button';
+      pick.className = 'st-photo-pick';
+      pick.setAttribute('aria-label', 'Seç');
+      pick.textContent = '✓';
+      const img = document.createElement('img');
+      img.src = stDisplaySrc(url);
+      img.alt = '';
+      img.loading = 'lazy';
+      img.onerror = function () { img.onerror = null; img.src = PLACEHOLDER_IMG; };
+      tile.appendChild(pick);
+      tile.appendChild(img);
+      return tile;
+    }
+    function stRenderGenerated() {
+      const box = document.getElementById('st-generated-editor');
+      if (!box) return;
+      let urls = [];
+      try {
+        urls = JSON.parse((generatedSeedEl && generatedSeedEl.textContent ? generatedSeedEl.textContent : '[]'));
+      } catch (e) {
+        urls = [];
+      }
+      if (!Array.isArray(urls)) urls = [];
+      box.innerHTML = '';
+      urls.filter(stIsMockupUrl).forEach(function (u) {
+        box.appendChild(stMakeGeneratedTile(String(u).trim()));
+      });
+    }
+    function stGetSelectedGeneratedUrls() {
+      const selected = [];
+      document.querySelectorAll('#st-generated-editor .ws-photo-tile.st-generated-picked').forEach(function (tile) {
+        const u = (tile.getAttribute('data-url') || '').trim();
+        if (u && stIsMockupUrl(u)) selected.push(u);
+      });
+      return selected;
+    }
+    function stParseSeoTags(text) {
+      const raw = String(text || '').split(',');
+      const out = [];
+      raw.forEach(function (t) {
+        const s = t.trim().toLowerCase().slice(0, 20).trim();
+        if (!s || out.indexOf(s) !== -1) return;
+        out.push(s);
+      });
+      return out.slice(0, 13);
+    }
+    function stSyncDraftFromSeoInputs() {
+      stDraft.seo_title = (document.getElementById('st_seo_title')?.value || '').trim().slice(0, 140);
+      stDraft.primary_color = (document.getElementById('st_primary_color')?.value || '').trim();
+      stDraft.secondary_color = (document.getElementById('st_secondary_color')?.value || '').trim();
+      stDraft.occasion = (document.getElementById('st_occasion')?.value || '').trim();
+      stDraft.holiday = (document.getElementById('st_holiday')?.value || '').trim();
+      stDraft.graphic = (document.getElementById('st_graphic')?.value || '').trim();
+      stDraft.seo_tags = stParseSeoTags(document.getElementById('st_seo_tags')?.value || '');
+      if (stDraft.seo_title) stDraft.title = stDraft.seo_title;
+      if (Array.isArray(stDraft.seo_tags) && stDraft.seo_tags.length) stDraft.tags = stDraft.seo_tags.slice(0, 13);
+      if (!stDraft.workspace_assets || typeof stDraft.workspace_assets !== 'object') stDraft.workspace_assets = {};
+    }
+    function stRefreshSeoInputs() {
+      document.getElementById('st_seo_title').value = String(stDraft.seo_title || '').slice(0, 140);
+      document.getElementById('st_primary_color').value = String(stDraft.primary_color || '');
+      document.getElementById('st_secondary_color').value = String(stDraft.secondary_color || '');
+      document.getElementById('st_occasion').value = String(stDraft.occasion || '');
+      document.getElementById('st_holiday').value = String(stDraft.holiday || '');
+      document.getElementById('st_graphic').value = String(stDraft.graphic || '');
+      document.getElementById('st_seo_tags').value = Array.isArray(stDraft.seo_tags)
+        ? stDraft.seo_tags.map(function (x) { return String(x || '').slice(0, 20); }).slice(0, 13).join(', ')
+        : '';
+    }
+
+    async function stOptimizeUploadFile(file, role) {
+      const MAX_SIDE = 3400;
+      const TARGET_MAX_BYTES = 2 * 1024 * 1024;
+      if (!file) return null;
+      if (file.size <= TARGET_MAX_BYTES) return file;
+      let bmp;
+      try {
+        bmp = await createImageBitmap(file);
+      } catch (err) {
+        return file;
+      }
+      const ow = bmp.width || 1;
+      const oh = bmp.height || 1;
+      const scale = Math.min(1, MAX_SIDE / Math.max(ow, oh));
+      const nw = Math.max(1, Math.round(ow * scale));
+      const nh = Math.max(1, Math.round(oh * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = nw;
+      canvas.height = nh;
+      const ctx = canvas.getContext('2d', { alpha: true });
+      if (!ctx) return file;
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(bmp, 0, 0, nw, nh);
+      const tries = [0.95, 0.9, 0.85, 0.8, 0.75, 0.7];
+      for (let i = 0; i < tries.length; i += 1) {
+        const q = tries[i];
+        const blob = await new Promise(function(resolve){
+          canvas.toBlob(resolve, 'image/webp', q);
+        });
+        if (!blob) continue;
+        if (blob.size <= TARGET_MAX_BYTES || i === tries.length - 1) {
+          const nameBase = (file.name || role || 'design').replace(/\.[^.]+$/, '');
+          return new File([blob], nameBase + '.webp', { type: 'image/webp' });
+        }
+      }
+      return file;
+    }
+    window.stGenerateMockups = async function (e) {
+      if (e && e.preventDefault) e.preventDefault();
+      const whiteFile = document.getElementById('st_design_white_file');
+      const blackFile = document.getElementById('st_design_black_file');
+      if (!whiteFile || !blackFile) return false;
+      if (!whiteFile.files || !whiteFile.files.length) { alert('White design dosyasını seçin.'); return false; }
+      if (!blackFile.files || !blackFile.files.length) { alert('Black design dosyasını seçin.'); return false; }
+      const selected = [];
+      document.querySelectorAll('.st-pick-template.st-pick-template--selected').forEach(function (btn) {
+        const u = (btn.getAttribute('data-url') || '').trim();
+        if (u) selected.push(u);
+      });
+      if (!selected.length) { alert('Lutfen en az bir template secin.'); return false; }
+      const optWhite = await stOptimizeUploadFile(whiteFile.files[0], 'white');
+      const optBlack = await stOptimizeUploadFile(blackFile.files[0], 'black');
+      if (!optWhite || !optBlack) {
+        alert('Design dosyaları hazırlanırken bir hata oluştu.');
+        return false;
+      }
+      if ((optWhite.size + optBlack.size) > (4 * 1024 * 1024)) {
+        alert('Dosyalar hala çok büyük. Biraz daha küçük design yüklemeyi deneyin.');
+        return false;
+      }
+      const dtW = new DataTransfer();
+      dtW.items.add(optWhite);
+      whiteFile.files = dtW.files;
+      const dtB = new DataTransfer();
+      dtB.items.add(optBlack);
+      blackFile.files = dtB.files;
+      stSyncDraftFromSeoInputs();
+      document.getElementById('st_draft_json_generate').value = JSON.stringify(stDraft);
+      document.getElementById('st_selected_template_urls').value = JSON.stringify(selected);
+      document.getElementById('form-studio-generate').submit();
+      return false;
+    };
+
+    window.stDownloadSelected = function (e) {
+      if (e && e.preventDefault) e.preventDefault();
+      const selected = stGetSelectedGeneratedUrls();
+      if (!selected.length) { alert('Lutfen en az bir üretilmiş mockup seçin.'); return false; }
+      document.getElementById('st_selected_generated_urls').value = JSON.stringify(selected);
+      document.getElementById('form-studio-download-selected').submit();
+      return false;
+    };
+    window.stAnalyzeSeo = function (e) {
+      if (e && e.preventDefault) e.preventDefault();
+      stSyncDraftFromSeoInputs();
+      const hasBlack = stDraft.workspace_assets && String(stDraft.workspace_assets.black_design_path || '').trim();
+      if (!hasBlack) {
+        alert('Önce mockup üretin (black design yolu bulunamadı).');
+        return false;
+      }
+      document.getElementById('st_draft_json_analyze').value = JSON.stringify(stDraft);
+      document.getElementById('form-st-analyze-seo').submit();
+      return false;
+    };
+    window.stPublishEtsy = function (e) {
+      if (e && e.preventDefault) e.preventDefault();
+      stSyncDraftFromSeoInputs();
+      const selected = stGetSelectedGeneratedUrls();
+      if (!selected.length) {
+        alert('Önce en az bir mockup seçin.');
+        return false;
+      }
+      document.getElementById('st_selected_mockup_urls_publish').value = JSON.stringify(selected);
+      document.getElementById('st_draft_json_publish').value = JSON.stringify(stDraft);
+      document.getElementById('st_etsy_update_listing_id_hidden').value =
+        (document.getElementById('st_etsy_update_listing_id').value || '').trim();
+      document.getElementById('form-st-publish').submit();
+      return false;
+    };
+
+    function stBindDropZone(zoneId, inputId, labelId) {
+      const zone = document.getElementById(zoneId);
+      const input = document.getElementById(inputId);
+      const nameEl = document.getElementById(labelId);
+      if (!zone || !input) return;
+      function setFile(file) {
+        if (!file) return;
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        input.files = dt.files;
+        if (nameEl) nameEl.textContent = file.name;
+      }
+      zone.addEventListener('click', function () { input.click(); });
+      input.addEventListener('change', function () {
+        if (input.files && input.files.length && nameEl) nameEl.textContent = input.files[0].name;
+      });
+      ['dragenter', 'dragover'].forEach(function (evt) {
+        zone.addEventListener(evt, function (ev) {
+          ev.preventDefault();
+          zone.style.borderColor = 'var(--accent)';
+          zone.style.background = '#eef2ff';
+        });
+      });
+      ['dragleave', 'drop'].forEach(function (evt) {
+        zone.addEventListener(evt, function (ev) {
+          ev.preventDefault();
+          zone.style.borderColor = '';
+          zone.style.background = '#fff';
+        });
+      });
+      zone.addEventListener('drop', function (ev) {
+        const files = ev.dataTransfer && ev.dataTransfer.files;
+        if (!files || !files.length) return;
+        setFile(files[0]);
+      });
+    }
+
+    document.querySelectorAll('.st-pick-template').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        btn.classList.toggle('st-pick-template--selected');
+        if (btn.classList.contains('st-pick-template--selected')) {
+          btn.style.outline = '2px solid var(--accent)';
+          btn.style.outlineOffset = '2px';
+        } else {
+          btn.style.outline = '';
+          btn.style.outlineOffset = '';
+        }
+      });
+    });
+
+    (function stInitLibraryTabs() {
+      const tabs = Array.from(document.querySelectorAll('.st-lib-tab'));
+      const panels = Array.from(document.querySelectorAll('.st-lib-panel'));
+      if (!tabs.length || !panels.length) return;
+      function setActive(cat) {
+        tabs.forEach(function (t) {
+          const on = (t.getAttribute('data-category') || '') === cat;
+          t.classList.toggle('st-lib-tab--active', on);
+          t.style.background = on ? 'var(--accent)' : '';
+          t.style.color = on ? '#fff' : '';
+          t.style.borderColor = on ? 'var(--accent)' : '';
+        });
+        panels.forEach(function (p) {
+          const on = (p.getAttribute('data-category') || '') === cat;
+          p.style.display = on ? 'grid' : 'none';
+        });
+      }
+      tabs.forEach(function (t) {
+        t.addEventListener('click', function () {
+          setActive((t.getAttribute('data-category') || '').trim());
+        });
+      });
+    })();
+
+    const generatedBox = document.getElementById('st-generated-editor');
+    if (generatedBox) {
+      generatedBox.addEventListener('click', function (ev) {
+        const pick = ev.target.closest('.st-photo-pick');
+        if (pick) {
+          const tile = pick.closest('.ws-photo-tile');
+          if (!tile) return;
+          tile.classList.toggle('st-generated-picked');
+          if (tile.classList.contains('st-generated-picked')) {
+            tile.style.outline = '2px solid #0f766e';
+            tile.style.outlineOffset = '2px';
+          } else {
+            tile.style.outline = '';
+            tile.style.outlineOffset = '';
+          }
+          return;
+        }
+        const tile = ev.target.closest('.ws-photo-tile');
+        if (!tile || !generatedBox.contains(tile)) return;
+        const u = (tile.getAttribute('data-url') || '').trim();
+        if (!u) return;
+        stOpenLightbox(u);
+      });
+    }
+    if (lightboxEl) lightboxEl.addEventListener('click', stCloseLightbox);
+    document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') stCloseLightbox(); });
+    stBindDropZone('st_drop_white', 'st_design_white_file', 'st_drop_white_name');
+    stBindDropZone('st_drop_black', 'st_design_black_file', 'st_drop_black_name');
+    stRenderGenerated();
+    stRefreshSeoInputs();
+  })();
+</script>
+<style>
+  .st-photo-pick {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    width: 28px;
+    height: 28px;
+    border: none;
+    border-radius: 50%;
+    background: rgba(15, 118, 110, 0.85);
+    color: #fff;
+    font-size: 14px;
+    cursor: pointer;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .st-photo-pick:hover { background: #0f766e; }
+</style>
 {% endblock %}

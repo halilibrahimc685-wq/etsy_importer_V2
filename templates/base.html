@@ -177,10 +177,9 @@
     <div class="app">
       <aside class="sidebar">
         <a href="/" class="sidebar-brand">Etsy <span>Lab</span></a>
-        <a href="/" class="nav-item{% if (active_nav|default('workspace')) == 'workspace' %} active{% endif %}"><span>🖼</span> Görseller → Etsy</a>
-        <a href="/studio" class="nav-item{% if (active_nav|default('workspace')) == 'studio' %} active{% endif %}"><span>🧪</span> Mockup Studio</a>
+        <a href="/" class="nav-item{% if (active_nav|default('workspace')) == 'workspace' %} active{% endif %}"><span>🖼</span> Mockup → Etsy</a>
         <p style="padding: 8px 20px 0; margin: 0; font-size: 0.8rem; color: #8b909a; line-height: 1.45;">
-          {% block sidebar_hint %}Amazon’dan renk/varyant görselleri; Etsy’de yalnız fotoğraflı taslak.{% endblock %}
+          {% block sidebar_hint %}Sadece kendi design ve mockup şablonlarınla Etsy draft üretimi.{% endblock %}
         </p>
       </aside>
       <div class="main">

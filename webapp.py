@@ -4,11 +4,11 @@ import copy
 import io
 import json
 import logging
+import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import re
 import time
-import urllib.request
 import zipfile
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -34,8 +34,6 @@ from etsy_client import (
     update_existing_listing,
     upload_listing_image_from_url,
 )
-from main import fetch_html_simple
-from amazon_scraper import canonical_amazon_dp_url, is_amazon_cdn_product_image_url
 from mockup_engine import (
     MockupProcessingConfig,
     SUPPORTED_EXTENSIONS,
@@ -47,7 +45,6 @@ from mockup_engine import (
     process_all,
     resolve_placement,
 )
-from scraper import parse_rendered_html, scrape_with_playwright, to_draft_dict
 
 load_dotenv()
 
@@ -60,27 +57,9 @@ def _drafts_base_dir() -> Path:
 
 _DRAFTS_BASE = _drafts_base_dir()
 
-app = FastAPI(title="Amazon -> Etsy Importer")
+app = FastAPI(title="Mockup -> Etsy Importer")
 _templates_dir = (Path(__file__).resolve().parent / "templates").resolve()
 templates = Jinja2Templates(directory=str(_templates_dir))
-
-
-def amazon_image_display_url(raw: Optional[str]) -> str:
-    """Tarayıcı önizlemesi: Amazon CDN bazen doğrudan <img> ile engellenir; kendi sunucumuzdan servis."""
-    try:
-        u = (raw if isinstance(raw, str) else str(raw or "")).strip()
-        if not u or not is_amazon_cdn_product_image_url(u):
-            return u
-        return "/media/amazon-image?u=" + quote(u, safe="")
-    except Exception:
-        return (raw or "").strip() if isinstance(raw, str) else ""
-
-
-def _jinja_filter_amazon_display(value: Any) -> str:
-    return amazon_image_display_url(None if value is None else str(value))
-
-
-templates.env.filters["amazon_display"] = _jinja_filter_amazon_display
 
 
 @app.middleware("http")
@@ -842,6 +821,313 @@ def _generate_etsy_tags(keywords: list[str], title: str) -> tuple[list[str], str
     return [], "AI"
 
 
+def _default_seo_fields() -> dict[str, Any]:
+    return {
+        "seo_title": "",
+        "seo_tags": [],
+        "primary_color": "",
+        "secondary_color": "",
+        "occasion": "",
+        "holiday": "",
+        "graphic": "",
+    }
+
+
+def _fallback_seo_fields() -> dict[str, Any]:
+    return {
+        "seo_title": "tshirt design",
+        "seo_tags": ["tshirt", "graphic", "design"],
+        "primary_color": "unknown",
+        "secondary_color": "unknown",
+        "occasion": "unknown",
+        "holiday": "unknown",
+        "graphic": "unknown",
+    }
+
+
+def _normalize_seo_tags(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    cleaned = _dedupe_preserve_order([str(x) for x in values if isinstance(x, str)])
+    return cleaned[:_ETSY_TAG_MAX_COUNT]
+
+
+def _normalize_seo_title(value: Any) -> str:
+    return str(value or "").strip()[:140]
+
+
+def _expand_seo_title_if_too_short(
+    title: str,
+    *,
+    tags: list[str],
+    primary_color: str,
+    secondary_color: str,
+    occasion: str,
+    holiday: str,
+    graphic: str,
+) -> str:
+    base = _normalize_seo_title(title)
+    if len(base) >= 65:
+        return base
+    parts: list[str] = [base] if base else []
+    for extra in [graphic, occasion, holiday, primary_color, secondary_color]:
+        x = str(extra or "").strip()
+        if x and x.lower() not in " ".join(parts).lower():
+            parts.append(x)
+    for t in tags[:6]:
+        tt = str(t or "").strip()
+        if tt and tt.lower() not in " ".join(parts).lower():
+            parts.append(tt)
+        if len(" ".join(parts)) >= 80:
+            break
+    out = _normalize_seo_title(" ".join(parts))
+    return out or base
+
+
+def _prepare_design_image_for_ai(design_path: Path) -> tuple[bytes, str]:
+    """
+    GPT vision için resmi küçültüp WebP'e çevirir.
+    Fallback: dönüştürme başarısızsa orijinal dosya byte'ları.
+    """
+    try:
+        max_side_raw = (os.environ.get("OPENAI_DESIGN_MAX_SIDE") or "768").strip()
+        max_side = max(512, min(768, int(max_side_raw)))
+    except Exception:
+        max_side = 768
+    try:
+        quality_raw = (os.environ.get("OPENAI_DESIGN_WEBP_QUALITY") or "70").strip()
+        quality = max(40, min(90, int(quality_raw)))
+    except Exception:
+        quality = 70
+    try:
+        max_bytes_raw = (os.environ.get("OPENAI_DESIGN_MAX_BYTES") or "450000").strip()
+        max_bytes = max(120_000, min(900_000, int(max_bytes_raw)))
+    except Exception:
+        max_bytes = 450_000
+    try:
+        with Image.open(design_path) as im:
+            if im.mode not in {"RGB", "RGBA"}:
+                im = im.convert("RGBA")
+            cur = im
+            while True:
+                w, h = cur.size
+                scale = min(1.0, float(max_side) / float(max(w, h, 1)))
+                nw = max(1, int(round(w * scale)))
+                nh = max(1, int(round(h * scale)))
+                if (nw, nh) != (w, h):
+                    cur = cur.resize((nw, nh), Image.Resampling.LANCZOS)
+                for q in [quality, max(40, quality - 10), 40]:
+                    buf = io.BytesIO()
+                    cur.save(buf, format="WEBP", quality=q, method=6)
+                    data = buf.getvalue()
+                    if data and len(data) <= max_bytes:
+                        return data, "image/webp"
+                # Hala büyükse bir kademe daha küçült
+                if max(cur.size) <= 512:
+                    break
+                cur = cur.resize(
+                    (max(1, int(cur.size[0] * 0.82)), max(1, int(cur.size[1] * 0.82))),
+                    Image.Resampling.LANCZOS,
+                )
+    except Exception:
+        pass
+    fallback = design_path.read_bytes()
+    if len(fallback) > max_bytes:
+        raise RuntimeError(
+            "Design resmi AI analiz için çok büyük. Daha küçük bir dosya yükleyin "
+            "veya OPENAI_DESIGN_MAX_BYTES değerini artırın."
+        )
+    ext = design_path.suffix.lower()
+    mime = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+    }.get(ext, "application/octet-stream")
+    return fallback, mime
+
+
+def _remove_hallucinated_subject_terms(text: str, detected_subjects: list[str]) -> str:
+    s = str(text or "")
+    detected_tokens: set[str] = set()
+    for item in detected_subjects:
+        for t in re.findall(r"[a-z0-9]{3,}", str(item).lower()):
+            detected_tokens.add(t)
+    risky_terms = {
+        "cat",
+        "dog",
+        "pet",
+        "animal",
+        "mickey",
+        "disney",
+        "frozen",
+        "princess",
+        "superhero",
+        "mandalorian",
+        "star wars",
+    }
+    for term in risky_terms:
+        parts = [p for p in re.findall(r"[a-z0-9]{3,}", term.lower())]
+        if parts and all(p not in detected_tokens for p in parts):
+            s = re.sub(rf"\b{re.escape(term)}\b", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s{2,}", " ", s).strip(" ,;-")
+    return s
+
+
+def _analyze_design_for_seo(design_path: Path) -> dict[str, Any]:
+    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY bulunamadı.")
+    if not design_path.is_file():
+        raise RuntimeError(f"Design dosyası bulunamadı: {design_path}")
+    model = (
+        os.environ.get("OPENAI_VISION_MODEL")
+        or os.environ.get("OPENAI_MODEL")
+        or "gpt-4o-mini"
+    ).strip()
+    image_bytes, mime = _prepare_design_image_for_ai(design_path)
+    image_url_override = (os.environ.get("OPENAI_IMAGE_URL") or "").strip()
+    if image_url_override:
+        image_ref = image_url_override
+    else:
+        image_b64 = base64.b64encode(image_bytes).decode("ascii")
+        image_ref = f"data:{mime};base64,{image_b64}"
+    prompt_text = (
+        "You are an Etsy SEO generator.\n"
+        "Analyze the image first and describe only clearly visible content.\n"
+        "Do not use generic niches unless visually relevant.\n"
+        "TITLE RULES (MANDATORY):\n"
+        "- target length: 100-130 chars\n"
+        "- absolute max: 140 chars\n"
+        "- minimum: 90 chars\n"
+        "- include the main visible subject\n"
+        "- include at least 2 strong relevant keywords\n"
+        "- readable, not keyword spam\n"
+        "- if too short: expand with relevant keywords\n"
+        "- if too long: trim intelligently (never cut mid-word)\n"
+        "TAG RULES (MANDATORY):\n"
+        "- exactly 13 tags\n"
+        "- each tag length: 2-20 chars\n"
+        "- all tags unique\n"
+        "- tags must be directly image-related\n"
+        "- no generic filler unless visually relevant\n"
+        "- if not enough tags, generate additional relevant tags from subject/style/audience\n"
+        "HARD CONSTRAINTS:\n"
+        "- never return null\n"
+        "- seo_tags must always be an array with 13 items\n"
+        "- if uncertain, produce best possible relevant guess from visible content\n"
+        "VALIDATION BEFORE RETURN:\n"
+        "- validate title length\n"
+        "- validate tag count is exactly 13\n"
+        "- validate each tag <=20 chars\n"
+        "- remove duplicates and refill to 13 with relevant tags\n"
+        "- if any rule fails, fix before returning\n"
+        "If output includes unrelated concepts return {\"error\":\"invalid_output\"}.\n"
+        "Return ONLY JSON (no explanations, no markdown):\n"
+        "{\"seo_title\":\"\",\"seo_tags\":[],\"primary_color\":\"\",\"secondary_color\":\"\",\"occasion\":\"\",\"holiday\":\"\",\"graphic\":\"\"}"
+    )
+    payload = {
+        "model": model,
+        "temperature": 0,
+        "max_tokens": 400,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {
+                "role": "system",
+                "content": "Return only strict JSON output.",
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt_text},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_ref,
+                            "detail": "low",
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+    try:
+        with httpx.Client(timeout=90.0) as client:
+            resp = client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+        resp.raise_for_status()
+        data = resp.json()
+        txt = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        parsed = json.loads(txt) if isinstance(txt, str) else {}
+    except Exception as exc:
+        raise RuntimeError(f"GPT analiz hatası: {exc}")
+
+    out = _default_seo_fields()
+    if not isinstance(parsed, dict):
+        return _fallback_seo_fields()
+    if str(parsed.get("error") or "").strip().lower() == "invalid_output":
+        return _fallback_seo_fields()
+    if parsed.get("seo_tags") is None:
+        parsed["seo_tags"] = []
+    raw_detected = parsed.get("detected_subjects")
+    raw_detected_list = raw_detected if isinstance(raw_detected, list) else []
+    detected_subjects = [
+        str(x).strip()
+        for x in raw_detected_list
+        if isinstance(x, str) and str(x).strip()
+    ]
+    clean_title = _remove_hallucinated_subject_terms(
+        str(parsed.get("seo_title") or ""),
+        detected_subjects,
+    )
+    out["seo_title"] = _normalize_seo_title(clean_title)
+    raw_tags = _normalize_seo_tags(parsed.get("seo_tags") or [])
+    cleaned_tags = [
+        _remove_hallucinated_subject_terms(tag, detected_subjects) for tag in raw_tags
+    ]
+    out["seo_tags"] = _normalize_seo_tags(cleaned_tags)
+    if len(out["seo_tags"]) < _ETSY_TAG_MAX_COUNT:
+        filler_seed = [
+            out["seo_title"],
+            str(parsed.get("graphic") or ""),
+            str(parsed.get("occasion") or ""),
+            str(parsed.get("holiday") or ""),
+            str(parsed.get("primary_color") or ""),
+            str(parsed.get("secondary_color") or ""),
+            "shirt design",
+            "gift idea",
+            "trending design",
+        ]
+        fill_tags = _fallback_etsy_tags([x for x in filler_seed if x], out["seo_title"])
+        for tag in fill_tags:
+            if tag not in out["seo_tags"]:
+                out["seo_tags"].append(tag)
+            if len(out["seo_tags"]) >= _ETSY_TAG_MAX_COUNT:
+                break
+    out["primary_color"] = str(parsed.get("primary_color") or "").strip()
+    out["secondary_color"] = str(parsed.get("secondary_color") or "").strip()
+    out["occasion"] = str(parsed.get("occasion") or "").strip()
+    out["holiday"] = str(parsed.get("holiday") or "").strip()
+    out["graphic"] = str(parsed.get("graphic") or "").strip()
+    out["seo_title"] = _expand_seo_title_if_too_short(
+        out["seo_title"],
+        tags=out["seo_tags"],
+        primary_color=out["primary_color"],
+        secondary_color=out["secondary_color"],
+        occasion=out["occasion"],
+        holiday=out["holiday"],
+        graphic=out["graphic"],
+    )
+    out["seo_tags"] = _normalize_seo_tags(out.get("seo_tags") or [])
+    return out
+
+
 def _etsy_placeholder_title() -> str:
     return (os.environ.get("ETSY_DRAFT_PLACEHOLDER_TITLE") or "Draft — add listing details in Etsy")[:140]
 
@@ -850,7 +1136,7 @@ def _etsy_placeholder_description(source_url: str = "") -> str:
     base = (os.environ.get("ETSY_DRAFT_PLACEHOLDER_DESCRIPTION") or "").strip()
     if not base:
         base = (
-            "Photos from Amazon listing (color variants). "
+            "Photos from selected mockups and uploaded designs. "
             "Edit title, description, price, and inventory in Etsy."
         )
     if source_url.strip():
@@ -876,15 +1162,6 @@ def _minimal_create_listing_kwargs() -> tuple[dict[str, Any], str]:
         },
         note,
     )
-
-
-def _validate_amazon_url(url: str) -> None:
-    p = urlparse(url)
-    if p.scheme not in {"http", "https"}:
-        raise RuntimeError("URL http/https olmalı.")
-    host = (p.netloc or "").lower()
-    if "amazon." not in host:
-        raise RuntimeError("Yalnızca Amazon ürün URL destekleniyor.")
 
 
 def _public_image_fetch_url(url: str) -> str:
@@ -1149,6 +1426,14 @@ def _normalize_images_only_draft(draft: dict[str, Any]) -> dict[str, Any]:
         draft["variations"] = []
     if "workspace_meta" in draft:
         del draft["workspace_meta"]
+    if "seo_title" not in draft or not isinstance(draft.get("seo_title"), str):
+        draft["seo_title"] = ""
+    draft["seo_title"] = _normalize_seo_title(draft.get("seo_title"))
+    draft["seo_tags"] = _normalize_seo_tags(draft.get("seo_tags"))
+    for field in ("primary_color", "secondary_color", "occasion", "holiday", "graphic"):
+        if field not in draft or not isinstance(draft.get(field), str):
+            draft[field] = ""
+        draft[field] = str(draft.get(field) or "").strip()
     return draft
 
 
@@ -1230,77 +1515,6 @@ def _workspace_ui(draft: Optional[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _draft_image_count(d: dict[str, Any]) -> int:
-    imgs = d.get("images")
-    if not isinstance(imgs, list):
-        return 0
-    return len([x for x in imgs if isinstance(x, str) and str(x).strip()])
-
-
-def _build_draft(url: str, no_playwright: bool) -> tuple[dict[str, Any], str]:
-    _validate_amazon_url(url)
-    clean_url = canonical_amazon_dp_url(url)
-    last_html = ""
-    scrape_note = ""
-
-    def _fast_http_draft() -> dict[str, Any]:
-        nonlocal last_html
-        last_html = fetch_html_simple(clean_url)
-        listing_fast = parse_rendered_html(last_html, clean_url)
-        d = to_draft_dict(listing_fast)
-        d["source"] = dict(d.get("source") or {})
-        d["source"]["url"] = clean_url
-        return d
-
-    if no_playwright:
-        draft = _fast_http_draft()
-    else:
-        # Önce urllib çoğu zaman "Continue shopping" bot sayfası döndürür; doğrudan Playwright.
-        try:
-            listing = scrape_with_playwright(
-                clean_url,
-                headless=True,
-                wait_ms=4500,
-                variant_wait_ms=1800,
-                goto_timeout_ms=45000,
-            )
-            draft = to_draft_dict(listing)
-            draft["source"] = dict(draft.get("source") or {})
-            draft["source"]["url"] = clean_url
-        except Exception as exc:
-            scrape_note = f"Playwright çalışmadı — HTTP sonucuna düşüldü: {exc}"
-            draft = _fast_http_draft()
-        else:
-            if _draft_image_count(draft) < 1:
-                scrape_note = (
-                    "Tarayıcı oturumunda görsel çıkmadı (Amazon doğrulama veya bot sayfası olabilir). "
-                    "HTTP ile tekrar denendi."
-                )
-                draft_http = _fast_http_draft()
-                if _draft_image_count(draft_http) > 0:
-                    draft = draft_http
-                    scrape_note += f" HTTP: {_draft_image_count(draft)} görsel."
-                else:
-                    scrape_note += (
-                        " HTTP de boş. Terminalde: playwright install chromium — "
-                        "veya kısa linki normal tarayıcıda açıp ürün sayfası geldiğini doğrulayın: "
-                        f"{clean_url}"
-                    )
-    imgs = draft.get("images") if isinstance(draft.get("images"), list) else []
-    draft["workspace_assets"] = {
-        "amazon_images": [str(x).strip() for x in imgs if isinstance(x, str) and str(x).strip()],
-        "active_source": "amazon",
-    }
-    if scrape_note:
-        dbg = draft.get("debug")
-        if not isinstance(dbg, dict):
-            dbg = {}
-        dbg["scrape_note"] = scrape_note
-        draft["debug"] = dbg
-    out = _normalize_images_only_draft(draft)
-    return out, scrape_note
-
-
 def _workspace_draft_json_for_page(draft: dict[str, Any]) -> str:
     """
     Sayfaya gömülecek taslak: devasa debug alanını çıkarır (parse/performans),
@@ -1323,6 +1537,8 @@ def _workspace_draft_json_for_page(draft: dict[str, Any]) -> str:
         for x in mi_list
         if isinstance(x, str) and _is_mockup_media_url(str(x).strip())
     ]
+    black_design_path = str(wa.get("black_design_path") or "").strip()
+    white_design_path = str(wa.get("white_design_path") or "").strip()
     active = str(wa.get("active_source") or "amazon").strip().lower()
     if active not in {"amazon", "mockups"}:
         active = "amazon"
@@ -1335,10 +1551,19 @@ def _workspace_draft_json_for_page(draft: dict[str, Any]) -> str:
             "amazon_images": ai_f,
             "mockup_images": mi_f,
             "active_source": active,
+            "black_design_path": black_design_path,
+            "white_design_path": white_design_path,
         },
         "variations": draft.get("variations") if isinstance(draft.get("variations"), list) else [],
         "keywords": draft.get("keywords") if isinstance(draft.get("keywords"), list) else [],
         "tags": draft.get("tags") if isinstance(draft.get("tags"), list) else [],
+        "seo_title": _normalize_seo_title(draft.get("seo_title")),
+        "seo_tags": draft.get("seo_tags") if isinstance(draft.get("seo_tags"), list) else [],
+        "primary_color": str(draft.get("primary_color") or "").strip(),
+        "secondary_color": str(draft.get("secondary_color") or "").strip(),
+        "occasion": str(draft.get("occasion") or "").strip(),
+        "holiday": str(draft.get("holiday") or "").strip(),
+        "graphic": str(draft.get("graphic") or "").strip(),
     }
     return json.dumps(slim, ensure_ascii=False, separators=(",", ":"))
 
@@ -1372,6 +1597,21 @@ def _render_index(
         workspace_draft_json = _json_for_html_script_embed(workspace_draft_json)
     ws = _workspace_ui(workspace_draft)
     mockup_categories = _list_mockup_catalog()
+    generated_urls: list[str] = []
+    current_batch = ""
+    if isinstance(workspace_draft, dict):
+        wa = workspace_draft.get("workspace_assets")
+        if isinstance(wa, dict):
+            raw_urls = wa.get("mockup_images")
+            if isinstance(raw_urls, list):
+                generated_urls = [
+                    str(x).strip() for x in raw_urls if isinstance(x, str) and str(x).strip()
+                ]
+    if not generated_urls:
+        latest = _latest_workspace_batch_dir()
+        if latest:
+            current_batch = latest.name
+            generated_urls = _workspace_urls_for_batch(latest)
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -1390,6 +1630,14 @@ def _render_index(
             "ws": ws,
             "mockup_categories": mockup_categories,
             "mockup_library_note": _mockup_library_empty_note(mockup_categories),
+            "r2_active": _r2_enabled(),
+            "vercel_runtime": _on_vercel(),
+            "s3_prefix_label": _s3_prefix_label(),
+            "mockup_catalog_image_count": _mockup_catalog_image_count(mockup_categories),
+            "mockups_root_path": str(_mockups_root()),
+            "mockups_root_exists": _mockups_root().is_dir(),
+            "generated_urls": generated_urls,
+            "current_batch": current_batch,
         },
     )
 
@@ -1418,58 +1666,9 @@ def index(request: Request) -> HTMLResponse:
             )
         return _render_index(
             request,
-            warning=(
-                "Bu oturum bağlantısı geçersiz veya süresi doldu (sayfayı yeniden yükleyip "
-                "Amazon URL’sini tekrar gönderin)."
-            ),
+            warning="Bu oturum bağlantısı geçersiz veya süresi doldu.",
         )
     return _render_index(request)
-
-
-@app.get("/studio", response_class=HTMLResponse)
-def studio_page(
-    request: Request,
-    status: str = Query(""),
-    warning: str = Query(""),
-    error: str = Query(""),
-    batch: str = Query(""),
-) -> HTMLResponse:
-    batch_dir: Optional[Path] = None
-    if batch.strip():
-        cand = (WORKSPACE_MOCKUPS_ROOT / batch.strip()).resolve()
-        try:
-            cand.relative_to(WORKSPACE_MOCKUPS_ROOT.resolve())
-            if cand.is_dir():
-                batch_dir = cand
-        except ValueError:
-            batch_dir = None
-    if batch_dir is None:
-        batch_dir = _latest_workspace_batch_dir()
-    generated_urls = _workspace_urls_for_batch(batch_dir) if batch_dir else []
-    mockups_root = _mockups_root()
-    mockup_categories = _list_mockup_catalog()
-    return templates.TemplateResponse(
-        request,
-        "studio.html",
-        {
-            "request": request,
-            "active_nav": "studio",
-            "status": status.strip() or None,
-            "warning": warning.strip() or None,
-            "error": error.strip() or None,
-            "mockup_categories": mockup_categories,
-            "mockup_library_note": _mockup_library_empty_note(mockup_categories),
-            "r2_active": _r2_enabled(),
-            "vercel_runtime": _on_vercel(),
-            "s3_prefix_label": _s3_prefix_label(),
-            "mockup_catalog_image_count": _mockup_catalog_image_count(mockup_categories),
-            "mockups_root_path": str(mockups_root),
-            "mockups_root_exists": mockups_root.is_dir(),
-            "generated_urls": generated_urls,
-            "current_batch": batch_dir.name if batch_dir else "",
-            "etsy_shop_name": _etsy_shop_display_name(),
-        },
-    )
 
 
 @app.get("/media/mockups/{path:path}")
@@ -1581,116 +1780,37 @@ def workspace_r2_mockup_media(batch_id: str, path: str) -> Response:
     )
 
 
-@app.post("/studio/set-mockups-dir", response_class=HTMLResponse)
-def studio_set_mockups_dir(mockups_dir: str = Form("")) -> HTMLResponse:
+@app.post("/workspace/set-mockups-dir", response_class=HTMLResponse)
+def workspace_set_mockups_dir(mockups_dir: str = Form("")) -> HTMLResponse:
     cleaned = (mockups_dir or "").strip()
     if not cleaned:
         os.environ.pop("MOCKUPS_DIR", None)
-        return RedirectResponse(url="/studio?status=Mockups%20klasoru%20varsayilana%20alindi.", status_code=303)
+        return _redirect_workspace_state({"status": "Mockups klasörü varsayılana alındı."})
     resolved = Path(cleaned).expanduser().resolve()
     os.environ["MOCKUPS_DIR"] = str(resolved)
     if not resolved.is_dir():
         msg = quote(f"Mockups klasoru bulunamadi: {resolved}")
-        return RedirectResponse(url=f"/studio?warning={msg}", status_code=303)
+        return _redirect_workspace_state({"warning": f"Mockups klasörü bulunamadı: {resolved}"})
     status_msg = quote(f"Mockups klasoru guncellendi: {resolved}")
     if _on_vercel() and not _r2_enabled():
         w = quote(
             "Vercel: disk üzerinde büyük mockup görselleri yok; kütüphane için S3_*(R2) gerekir. "
             "Bu sadece placement.json yoludur, şablon PNG’lerini bekleme."
         )
-        return RedirectResponse(
-            url=f"/studio?status={status_msg}&warning={w}", status_code=303
+        return _redirect_workspace_state(
+            {
+                "status": f"Mockups klasörü güncellendi: {resolved}",
+                "warning": (
+                    "Vercel: disk üzerinde büyük mockup görselleri yok; kütüphane için S3_*(R2) gerekir. "
+                    "Bu sadece placement.json yoludur, şablon PNG’lerini bekleme."
+                ),
+            }
         )
-    return RedirectResponse(url=f"/studio?status={status_msg}", status_code=303)
+    return _redirect_workspace_state({"status": f"Mockups klasörü güncellendi: {resolved}"})
 
 
-@app.post("/studio/generate-mockups", response_class=HTMLResponse)
-async def studio_generate_mockups(
-    design_white_file: UploadFile = File(...),
-    design_black_file: UploadFile = File(...),
-    selected_template_urls: str = Form("[]"),
-) -> HTMLResponse:
-    try:
-        r2_mode = _r2_enabled()
-        root = _mockups_root()
-        if not r2_mode and not root.is_dir():
-            raise RuntimeError(f"Mockups klasoru bulunamadi: {root}")
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        batch_id = f"studio_{stamp}_{uuid4().hex[:8]}"
-        white_design_path = await _save_uploaded_design_file(
-            design_white_file, batch_id=batch_id, role="white"
-        )
-        black_design_path = await _save_uploaded_design_file(
-            design_black_file, batch_id=batch_id, role="black"
-        )
-        out_root = (WORKSPACE_MOCKUPS_ROOT / batch_id).resolve()
-        run_root = root
-        if r2_mode:
-            run_root = (WORKSPACE_DESIGNS_ROOT / f"{batch_id}_mockups_src").resolve()
-            run_root.mkdir(parents=True, exist_ok=True)
-            _seed_placement_json_into_run_root(run_root)
-        cfg = MockupProcessingConfig(
-            mockups_root=run_root,
-            dark_design_path=black_design_path,
-            light_design_path=white_design_path,
-            output_root=out_root,
-        )
-        selected_raw: list[str] = []
-        try:
-            p = json.loads(selected_template_urls or "[]")
-            if isinstance(p, list):
-                selected_raw = [str(x).strip() for x in p if isinstance(x, str) and str(x).strip()]
-        except Exception:
-            selected_raw = []
-        if r2_mode:
-            selected_rels = _template_rels_from_urls(selected_raw)
-            if not selected_rels:
-                raise RuntimeError("R2 modunda en az bir template secilmelidir.")
-            selected_paths = _download_r2_templates(run_root, selected_rels)
-        else:
-            selected_paths = _template_paths_from_urls(selected_raw, root)
-        if selected_raw and not selected_paths:
-            raise RuntimeError("Secilen template'ler gecersiz veya bulunamadi.")
-        if selected_paths:
-            out_paths, failed = _process_selected_mockups(cfg, selected_paths)
-        else:
-            out_paths, failed = process_all(cfg)
-        if not out_paths:
-            raise RuntimeError("Mockup uretilemedi.")
-        if _on_vercel() and _r2_enabled():
-            try:
-                _r2_mirror_workspace_batch(batch_id, out_root)
-            except Exception:
-                logging.getLogger("uvicorn.error").exception(
-                    "R2 workspace batch mirror basarisiz batch_id=%s", batch_id
-                )
-        status = quote(f"{len(out_paths)} mockup uretildi." + (f" {failed} dosya basarisiz." if failed else ""))
-        return RedirectResponse(url=f"/studio?status={status}&batch={quote(batch_id)}", status_code=303)
-    except Exception as exc:
-        return RedirectResponse(url=f"/studio?warning={quote(str(exc))}", status_code=303)
-
-
-@app.get("/studio/download-latest-mockups")
-def studio_download_latest_mockups() -> Response:
-    batch = _latest_workspace_batch_dir()
-    if not batch:
-        raise HTTPException(status_code=404, detail="Indirilecek mockup batch bulunamadi.")
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for p in sorted(batch.rglob("*")):
-            if not p.is_file():
-                continue
-            rel = p.relative_to(batch).as_posix()
-            zf.write(p, arcname=rel)
-    headers = {
-        "Content-Disposition": f'attachment; filename="{batch.name}.zip"',
-        "Cache-Control": "no-store",
-    }
-    return Response(content=buf.getvalue(), media_type="application/zip", headers=headers)
-
-
-@app.post("/studio/download-selected-mockups")
-def studio_download_selected_mockups(selected_urls: str = Form("[]")) -> Response:
+@app.post("/workspace/download-selected-mockups")
+def workspace_download_selected_mockups(selected_urls: str = Form("[]")) -> Response:
     try:
         raw = json.loads(selected_urls or "[]")
     except Exception:
@@ -1743,99 +1863,50 @@ def studio_download_selected_mockups(selected_urls: str = Form("[]")) -> Respons
     return Response(content=buf.getvalue(), media_type="application/zip", headers=headers)
 
 
-@app.get("/media/amazon-image")
-def amazon_image_proxy(u: str = Query("", max_length=4500)) -> Response:
-    """Amazon ürün görselini sunucu üzerinden ilet (tarayıcıda doğrudan CDN sık engellenir)."""
-    raw = unquote(u).strip()
-    if not raw or not is_amazon_cdn_product_image_url(raw):
-        raise HTTPException(status_code=400, detail="Geçersiz görsel URL")
-    req = urllib.request.Request(
-        raw,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-            ),
-            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        },
-        method="GET",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=60.0) as resp:
-            data = resp.read()
-            if len(data) > 30 * 1024 * 1024:
-                raise HTTPException(status_code=413, detail="Görsel çok büyük")
-            ct = resp.headers.get("content-type") or "image/jpeg"
-            if not ct.startswith("image/"):
-                ct = "image/jpeg"
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(status_code=502, detail="Görsel indirilemedi")
-    return Response(content=data, media_type=ct, headers={"Cache-Control": "public, max-age=86400"})
-
-
-@app.post("/workspace/scrape", response_class=HTMLResponse)
-def workspace_scrape(
+@app.post("/workspace/analyze-design", response_class=HTMLResponse)
+def workspace_analyze_design(
     request: Request,
-    url: str = Form(...),
-    no_playwright: bool = Form(False),
+    draft_json: str = Form("{}"),
 ) -> HTMLResponse:
     try:
-        clean_url = canonical_amazon_dp_url(url)
-        pre_match = _find_existing_draft_match(clean_url) or _find_existing_draft_match(url)
-        draft, scrape_note = _build_draft(url, no_playwright)
-        if isinstance(draft, dict):
-            _normalize_images_only_draft(draft)
-        asin = ""
-        if isinstance(draft, dict):
-            src = draft.get("source")
-            if isinstance(src, dict):
-                asin = str(src.get("item_id") or "")
-        match = _find_existing_draft_match(clean_url, asin) or _find_existing_draft_match(url, asin) or pre_match
-        warn = None
-        if match:
-            mid = str(match.get("listing_id") or match.get("etsy_listing_id") or "").strip()
-            asin_s = str(match.get("source_item_id") or "").strip()
-            warn = (
-                f"Bu link/ASIN için daha önce Etsy draft oluşturulmuş görünüyor"
-                f"{' (listing: ' + mid + ')' if mid else ''}"
-                f"{' | ASIN: ' + asin_s if asin_s else ''}. "
-                "Yeni draft açmadan önce mevcut listing’i güncellemek isteyebilirsin."
-            )
-        img_n = 0
-        if isinstance(draft, dict):
-            imgs = draft.get("images")
-            if isinstance(imgs, list):
-                img_n = len([x for x in imgs if isinstance(x, str) and x.strip()])
-        if scrape_note:
-            warn = f"{scrape_note} {warn}" if warn else scrape_note
-        if img_n == 0:
-            extra = (
-                "Hiç görsel alınamadı. Uzun takip linkleri yerine kısa adres kullanıldı: "
-                f"{clean_url} — 'HTTP only' kutusunu kapatıp tekrar deneyin (Chromium/Playwright gerekir). "
-                "Sunucu Amazon’a bot gibi görünüyorsa tarayıcı modu şarttır."
-            )
-            warn = f"{extra} {warn}" if warn else extra
-            status = "Yükleme tamamlandı ancak görsel bulunamadı (yukarıdaki uyarıya bakın)."
-        else:
-            status = (
-                f"{img_n} görsel hazır (her renk/varyant ASIN için en fazla 4 fotoğraf). "
-                "Etsy’ye yalnız fotoğraflı taslak için aşağıdaki düğmeyi kullanın."
-            )
+        draft = json.loads(draft_json or "{}")
+        if not isinstance(draft, dict):
+            draft = {}
+        draft = _normalize_images_only_draft(draft)
+        wa = draft.get("workspace_assets")
+        assets = wa if isinstance(wa, dict) else {}
+        black_path_raw = str(assets.get("black_design_path") or "").strip()
+        if not black_path_raw:
+            raise RuntimeError("Önce mockup üretimi yapıp black design yükleyin.")
+        black_path = Path(black_path_raw).expanduser().resolve()
+        seo = _analyze_design_for_seo(black_path)
+        draft["seo_title"] = str(seo.get("seo_title") or "").strip()[:140]
+        draft["seo_tags"] = _normalize_seo_tags(seo.get("seo_tags"))
+        draft["primary_color"] = str(seo.get("primary_color") or "").strip()
+        draft["secondary_color"] = str(seo.get("secondary_color") or "").strip()
+        draft["occasion"] = str(seo.get("occasion") or "").strip()
+        draft["holiday"] = str(seo.get("holiday") or "").strip()
+        draft["graphic"] = str(seo.get("graphic") or "").strip()
+        if draft["seo_title"]:
+            draft["title"] = draft["seo_title"]
+        if draft["seo_tags"]:
+            draft["tags"] = draft["seo_tags"][:_ETSY_TAG_MAX_COUNT]
+        draft = _normalize_images_only_draft(draft)
         return _redirect_workspace_state(
             {
-                "status": status,
-                "warning": warn,
-                "workspace_url": clean_url,
+                "status": "SEO analizi tamamlandı.",
                 "workspace_draft": draft,
             }
         )
     except Exception as exc:
+        try:
+            draft_err = json.loads(draft_json)
+        except Exception:
+            draft_err = None
         return _redirect_workspace_state(
             {
                 "error": str(exc),
-                "workspace_url": url,
+                "workspace_draft": draft_err if isinstance(draft_err, dict) else None,
             }
         )
 
@@ -1845,6 +1916,7 @@ def workspace_publish(
     request: Request,
     draft_json: str = Form(...),
     etsy_update_listing_id: str = Form(""),
+    selected_mockup_urls: str = Form("[]"),
 ) -> HTMLResponse:
     try:
         draft = json.loads(draft_json)
@@ -1853,16 +1925,52 @@ def workspace_publish(
         draft = _normalize_images_only_draft(draft)
         src = draft.get("source") if isinstance(draft.get("source"), dict) else {}
         source_url = str(src.get("url") or "")
-        draft_title = str(draft.get("title") or "").strip()
+        seo_title = str(draft.get("seo_title") or "").strip()
+        draft_title = seo_title or str(draft.get("title") or "").strip()
         title = draft_title[:140] if draft_title else _etsy_placeholder_title()
-        desc = _etsy_placeholder_description(source_url)
+        desc_parts = [_etsy_placeholder_description(source_url)]
+        for label, key in (
+            ("Primary Color", "primary_color"),
+            ("Secondary Color", "secondary_color"),
+            ("Occasion", "occasion"),
+            ("Holiday", "holiday"),
+            ("Graphic", "graphic"),
+        ):
+            val = str(draft.get(key) or "").strip()
+            if val:
+                desc_parts.append(f"{label}: {val}")
+        desc = "\n".join([x for x in desc_parts if x]).strip()[:49990]
         price = _etsy_placeholder_price()
 
-        raw_imgs = draft.get("images") or []
-        images = [x for x in raw_imgs if isinstance(x, str) and x.strip()][:20]
+        selected_images: list[str] = []
+        try:
+            parsed_selected = json.loads(selected_mockup_urls or "[]")
+            if isinstance(parsed_selected, list):
+                selected_images = [
+                    str(x).strip()
+                    for x in parsed_selected
+                    if isinstance(x, str) and str(x).strip() and _is_mockup_media_url(str(x).strip())
+                ]
+        except Exception:
+            selected_images = []
+        if selected_images:
+            images = []
+            seen_img: set[str] = set()
+            for u in selected_images:
+                if u in seen_img:
+                    continue
+                seen_img.add(u)
+                images.append(u)
+                if len(images) >= 20:
+                    break
+        else:
+            raw_imgs = draft.get("images") or []
+            images = [x for x in raw_imgs if isinstance(x, str) and x.strip()][:20]
         if not images:
             raise RuntimeError("Etsy’ye göndermek için en az bir görsel URL’si gerekir.")
-        raw_tags = draft.get("tags")
+        raw_tags = draft.get("seo_tags")
+        if not isinstance(raw_tags, list):
+            raw_tags = draft.get("tags")
         tags = [str(x).strip() for x in raw_tags] if isinstance(raw_tags, list) else []
         tags = [x for x in tags if x][:13]
 
@@ -2010,6 +2118,8 @@ async def workspace_generate_mockups(
         assets = d_assets if isinstance(d_assets, dict) else {}
         assets["mockup_images"] = urls
         assets["active_source"] = "mockups"
+        assets["black_design_path"] = str(black_design_path)
+        assets["white_design_path"] = str(white_design_path)
         draft["workspace_assets"] = assets
         draft["images"] = urls
         draft = _normalize_images_only_draft(draft)
