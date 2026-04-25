@@ -146,7 +146,7 @@
 <form id="form-studio-download-selected" method="post" action="/workspace/download-selected-mockups">
   <input type="hidden" name="selected_urls" id="st_selected_generated_urls" value="[]" />
 </form>
-<form id="form-st-analyze-seo" method="post" action="/workspace/analyze-design">
+<form id="form-st-analyze-seo" method="post" action="/workspace/analyze-design" enctype="multipart/form-data">
   <input type="hidden" id="st_draft_json_analyze" name="draft_json" value="{{ workspace_draft_json|default('{}')|e }}" />
   <input type="file" name="design_black_file" id="st_design_black_file_analyze" accept=".png,.jpg,.jpeg,.webp" style="display:none;" />
 </form>
