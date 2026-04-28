@@ -128,6 +128,26 @@
       <label class="hint" style="display:block;margin-top:10px;">SEO Tags (13 adet, virgülle)
         <textarea id="st_seo_tags" rows="2" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--border);"></textarea>
       </label>
+      <div id="st-text-input-box" style="display:none;margin-top:10px;padding:10px 12px;border-radius:8px;background:#fff7ed;border:1px solid #fdba74;">
+        <p class="hint" style="margin:0 0 8px;font-size:0.82rem;color:#9a3412;">⚠️ <strong>Görselde bir metin/isim var mı? Okuyamadım.</strong><br>Varsa aşağıya yaz — yeniden analiz ederim.</p>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <input id="st_user_text_hint" type="text" placeholder="Örn: Taylor Swift, #44, Love is Blind..." style="flex:1;min-width:200px;padding:7px 10px;border-radius:8px;border:1px solid var(--border);font-size:0.82rem;" />
+          <button type="button" class="btn btn-secondary" onclick="stReAnalyzeWithHint(event)" style="font-size:0.78rem;">Metinle yeniden analiz et</button>
+        </div>
+      </div>
+      <div id="st-seo-meta" style="display:none;margin-top:12px;padding:10px 12px;border-radius:8px;background:#f8fafc;border:1px solid var(--border);">
+        <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
+          <span class="hint" style="font-size:0.78rem;">Tespit edilen stil: <strong id="st_style_detected_label" style="color:var(--accent);"></strong></span>
+          <span id="st_attempt_badge" class="hint" style="font-size:0.75rem;padding:2px 8px;border-radius:12px;background:#e0f2fe;color:#0369a1;display:none;"></span>
+        </div>
+        <div id="st_selfcheck_issues_box" style="display:none;margin-bottom:8px;padding:7px 10px;border-radius:6px;background:#fef3c7;border:1px solid #fcd34d;font-size:0.75rem;color:#92400e;">
+          <strong>Self-check düzeltildi:</strong>
+          <ul id="st_selfcheck_issues_list" style="margin:4px 0 0 14px;padding:0;"></ul>
+        </div>
+        <label class="hint" style="display:block;font-size:0.78rem;">AI Gerekçesi (denetim için)
+          <textarea id="st_reasoning" rows="3" readonly style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid var(--border);font-size:0.75rem;color:#555;background:#fff;resize:vertical;"></textarea>
+        </label>
+      </div>
       <label class="hint" style="display:block;margin-top:10px;">Mevcut Etsy listing ID (opsiyonel update)
         <input id="st_etsy_update_listing_id" type="text" inputmode="numeric" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--border);" />
       </label>
@@ -254,6 +274,18 @@
       });
       return out.slice(0, 13);
     }
+    window.stReAnalyzeWithHint = function (e) {
+      if (e && e.preventDefault) e.preventDefault();
+      var hint = (document.getElementById('st_user_text_hint')?.value || '').trim();
+      if (!hint) { alert('Lütfen görseldeki metni/ismi gir.'); return false; }
+      stSyncDraftFromSeoInputs();
+      stDraft.user_text_hint = hint;
+      stDraft.needs_text_input = false;
+      document.getElementById('st_draft_json_analyze').value = JSON.stringify(stDraft);
+      document.getElementById('form-st-analyze-seo').submit();
+      return false;
+    };
+
     function stSyncDraftFromSeoInputs() {
       stDraft.seo_title = (document.getElementById('st_seo_title')?.value || '').trim().slice(0, 140);
       stDraft.primary_color = (document.getElementById('st_primary_color')?.value || '').trim();
@@ -276,6 +308,46 @@
       document.getElementById('st_seo_tags').value = Array.isArray(stDraft.seo_tags)
         ? stDraft.seo_tags.map(function (x) { return String(x || '').slice(0, 20); }).slice(0, 13).join(', ')
         : '';
+      var styleDetected = String(stDraft.style_detected || '');
+      var reasoning = String(stDraft.reasoning || '');
+      var attemptCount = stDraft.attempt_count || 0;
+      var selfcheckIssues = Array.isArray(stDraft.selfcheck_issues) ? stDraft.selfcheck_issues : [];
+      var metaBox = document.getElementById('st-seo-meta');
+      var styleLabel = document.getElementById('st_style_detected_label');
+      var reasoningEl = document.getElementById('st_reasoning');
+      var attemptBadge = document.getElementById('st_attempt_badge');
+      var issuesBox = document.getElementById('st_selfcheck_issues_box');
+      var issuesList = document.getElementById('st_selfcheck_issues_list');
+      var textInputBox = document.getElementById('st-text-input-box');
+      if (textInputBox) {
+        textInputBox.style.display = stDraft.needs_text_input ? '' : 'none';
+      }
+      if (metaBox && (styleDetected || reasoning || attemptCount)) {
+        metaBox.style.display = '';
+        if (styleLabel) styleLabel.textContent = styleDetected || '—';
+        if (reasoningEl) reasoningEl.value = reasoning;
+        if (attemptBadge && attemptCount) {
+          attemptBadge.textContent = attemptCount === 1 ? '✓ 1. denemede başarılı' : attemptCount + '. denemede başarılı';
+          attemptBadge.style.display = '';
+          attemptBadge.style.background = attemptCount === 1 ? '#dcfce7' : '#fef9c3';
+          attemptBadge.style.color = attemptCount === 1 ? '#166534' : '#854d0e';
+        }
+        if (issuesBox && issuesList) {
+          if (selfcheckIssues.length && attemptCount > 1) {
+            issuesList.innerHTML = '';
+            selfcheckIssues.forEach(function(issue) {
+              var li = document.createElement('li');
+              li.textContent = issue;
+              issuesList.appendChild(li);
+            });
+            issuesBox.style.display = '';
+          } else {
+            issuesBox.style.display = 'none';
+          }
+        }
+      } else if (metaBox) {
+        metaBox.style.display = 'none';
+      }
     }
 
     async function stOptimizeUploadFile(file, role) {
