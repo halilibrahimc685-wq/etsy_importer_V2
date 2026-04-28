@@ -758,7 +758,12 @@ def _normalize_tag_phrase(raw: str) -> str:
     if not s:
         return ""
     if len(s) > _ETSY_TAG_MAX_LEN:
-        s = s[:_ETSY_TAG_MAX_LEN].rstrip(" -&'")
+        s = s[:_ETSY_TAG_MAX_LEN]
+        # Always trim back to the last complete word boundary to avoid partial words.
+        last_space = s.rfind(" ")
+        if last_space > 0:
+            s = s[:last_space]
+        s = s.rstrip(" -&'")
     return s
 
 
@@ -810,26 +815,29 @@ def _ai_rewrite_etsy_tags(keywords: list[str], title: str) -> list[str]:
     model = (os.environ.get("OPENAI_MODEL") or "gpt-4o-mini").strip()
     payload = {
         "model": model,
-        "temperature": 0.2,
+        "temperature": 0.3,
+        "max_completion_tokens": 350,
         "response_format": {"type": "json_object"},
         "messages": [
             {
                 "role": "system",
                 "content": (
-                    "You generate Etsy SEO tags. Return strict JSON object with key "
-                    "'tags' as array of up to 13 lowercase strings, each <=20 chars."
+                    "You are an Etsy SEO specialist for physical t-shirts. "
+                    "Generate exactly 13 Etsy search tags for the given listing. "
+                    "Rules: each tag lowercase, max 20 chars, unique, multi-word phrases preferred. "
+                    "Mix product type (graphic tee, tshirt), subject (e.g. skull shirt), "
+                    "audience (gift for him, womens tee), style (vintage tshirt, retro tee), "
+                    "and use-case (birthday gift, funny gift) tags. "
+                    "Never use: digital, printable, wall art, poster. "
+                    "Return strict JSON: {\"tags\": [...]}"
                 ),
             },
             {
                 "role": "user",
                 "content": json.dumps(
                     {
-                        "title": title or "",
+                        "listing_title": title or "",
                         "keywords": keywords,
-                        "constraints": {
-                            "max_tags": _ETSY_TAG_MAX_COUNT,
-                            "max_chars_per_tag": _ETSY_TAG_MAX_LEN,
-                        },
                     },
                     ensure_ascii=False,
                 ),
@@ -867,7 +875,56 @@ def _generate_etsy_tags(keywords: list[str], title: str) -> tuple[list[str], str
     ai_tags = _ai_rewrite_etsy_tags(keywords, title)
     if ai_tags:
         return ai_tags[:_ETSY_TAG_MAX_COUNT], "AI"
-    return [], "AI"
+    fallback = _fallback_etsy_tags(keywords, title)
+    return fallback[:_ETSY_TAG_MAX_COUNT], "fallback"
+
+
+_FORBIDDEN_TAG_TERMS: set[str] = {
+    "dtf", "dtf shirt", "dtf print", "dtf transfer", "dtf tee",
+    "unisex", "unisex tee", "unisex shirt", "unisex t shirt",
+    "print on demand", "printable", "digital", "wall art", "poster",
+    "sublimation", "heat transfer",
+    "graphic t shirt", "printed tee", "printed shirt",
+    "cute tee", "cute shirt",
+    "everyday wear", "funny gift", "fun gift", "cool gift", "awesome tee",
+    "pastel aesthetic", "novelty tee", "novelty shirt", "bear graphic tee",
+    "humor aesthetic", "statement tshirt", "party joke shirt",
+    "bold graphic shirt", "bold graphic tee",
+    "bold graphic top", "bold top",
+}
+
+# Regex-based forbidden patterns (for rules not expressible as simple terms).
+_FORBIDDEN_TAG_REGEXES: list[re.Pattern[str]] = [
+    # Any tag ending with "aesthetic" when preceded by at least one word — "aesthetic" alone is allowed.
+    re.compile(r"[a-z].+\baesthetic$"),
+]
+
+
+# Pre-compiled patterns for faster repeated matching.
+_FORBIDDEN_TAG_PATTERNS: list[re.Pattern[str]] = []
+
+
+def _build_forbidden_patterns() -> None:
+    global _FORBIDDEN_TAG_PATTERNS
+    _FORBIDDEN_TAG_PATTERNS = [
+        re.compile(r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])")
+        for term in _FORBIDDEN_TAG_TERMS
+    ]
+
+
+_build_forbidden_patterns()
+
+
+def _tag_contains_forbidden(tag: str) -> bool:
+    tl = tag.strip().lower()
+    return (
+        any(p.search(tl) for p in _FORBIDDEN_TAG_PATTERNS)
+        or any(p.search(tl) for p in _FORBIDDEN_TAG_REGEXES)
+    )
+
+
+def _filter_forbidden_tags(tags: list[str]) -> list[str]:
+    return [t for t in tags if not _tag_contains_forbidden(t)]
 
 
 def _default_seo_fields() -> dict[str, Any]:
@@ -879,18 +936,32 @@ def _default_seo_fields() -> dict[str, Any]:
         "occasion": "",
         "holiday": "",
         "graphic": "",
+        "style_detected": "",
+        "reasoning": "",
+        "attempt_count": 1,
+        "selfcheck_issues": [],
+        "text_detected": "none",
+        "text_content": "",
+        "needs_text_input": False,
     }
 
 
 def _fallback_seo_fields() -> dict[str, Any]:
     return {
         "seo_title": "tshirt design",
-        "seo_tags": ["tshirt", "graphic", "design"],
+        "seo_tags": ["tshirt", "graphic tee", "shirt design"],
         "primary_color": "unknown",
         "secondary_color": "unknown",
         "occasion": "unknown",
         "holiday": "unknown",
         "graphic": "unknown",
+        "style_detected": "unknown",
+        "reasoning": "",
+        "attempt_count": 1,
+        "selfcheck_issues": [],
+        "text_detected": "none",
+        "text_content": "",
+        "needs_text_input": False,
     }
 
 
@@ -918,18 +989,22 @@ def _expand_seo_title_if_too_short(
     base = _normalize_seo_title(title)
     if len(base) >= 65:
         return base
-    parts: list[str] = [base] if base else []
-    for extra in [graphic, occasion, holiday, primary_color, secondary_color]:
-        x = str(extra or "").strip()
-        if x and x.lower() not in " ".join(parts).lower():
-            parts.append(x)
-    for t in tags[:6]:
-        tt = str(t or "").strip()
-        if tt and tt.lower() not in " ".join(parts).lower():
-            parts.append(tt)
-        if len(" ".join(parts)) >= 80:
+    segments: list[str] = [base] if base else []
+    joined_lower = base.lower()
+    for extra in [graphic, occasion, holiday]:
+        x = str(extra or "").strip().title()
+        if x and x.lower() not in joined_lower:
+            segments.append(x)
+            joined_lower = " ".join(segments).lower()
+    multi_word_tags = [t for t in tags[:8] if " " in t]
+    for t in multi_word_tags:
+        tt = str(t or "").strip().title()
+        if tt and tt.lower() not in joined_lower:
+            segments.append(tt)
+            joined_lower = " ".join(segments).lower()
+        if len(" | ".join(segments)) >= 80:
             break
-    out = _normalize_seo_title(" ".join(parts))
+    out = _normalize_seo_title(" | ".join(segments))
     return out or base
 
 
@@ -1007,10 +1082,6 @@ def _remove_hallucinated_subject_terms(text: str, detected_subjects: list[str]) 
         "dog",
         "pet",
         "animal",
-        "mickey",
-        "disney",
-        "frozen",
-        "princess",
         "superhero",
         "mandalorian",
         "star wars",
@@ -1023,7 +1094,363 @@ def _remove_hallucinated_subject_terms(text: str, detected_subjects: list[str]) 
     return s
 
 
-def _analyze_design_for_seo(design_path: Path) -> dict[str, Any]:
+def _build_seo_prompt(prior_issues: list[str], text_hint: str = "") -> str:
+    forbidden_str = ", ".join(sorted(_FORBIDDEN_TAG_TERMS))
+    text_hint_block = (
+        f"USER-PROVIDED TEXT HINT: The user has manually identified the following text in the design: \"{text_hint.strip()}\". "
+        "Use this text in your title and tags as appropriate (name, phrase, or keyword).\n\n"
+        if text_hint.strip() else ""
+    )
+    base = (
+        "You are an expert Etsy SEO copywriter for printed physical t-shirts.\n\n"
+        "PRODUCT CONTEXT: Always a wearable physical t-shirt. Never digital, download, wall art, or poster.\n\n"
+        + text_hint_block +
+
+        "=== STEP 0: TEXT DETECTION ===\n"
+        "Before anything else, carefully scan the entire design for any visible text, letters, numbers, words, or name-like elements.\n"
+        "- CLEARLY READABLE: Extract the exact text as written.\n"
+        "- PRESENT BUT HARD TO READ (rotated, mirrored, angled, stylized, overlapping): Attempt to decode it letter by letter. Provide your best guess and mark as 'partially_readable'.\n"
+        "- NO TEXT VISIBLE: Mark as 'none'.\n"
+        "This is critical — text often reveals a person's name, slogan, cultural reference, or sports number that must appear in the title and tags.\n"
+        "Output in: \"text_detected\": \"none\"|\"readable\"|\"partially_readable\", \"text_content\": \"<extracted or best-guess text>\"\n\n"
+
+        "=== STEP 1: IMAGE ANALYSIS ===\n"
+        "Study the design carefully. Identify:\n"
+        "- SUBJECT: the main graphic/character/object depicted (be specific: e.g. 'mushroom with stars' not just 'nature')\n"
+        "- ART STYLE: choose the most accurate from this list or use your own if more fitting:\n"
+        "  vintage, retro, cottagecore, storybook, engraving, woodcut, boho, minimalist, bold/graphic,\n"
+        "  watercolor, whimsical, dark/gothic, cute/kawaii, funny/humor, geometric, floral, maximalist\n"
+        "- AUDIENCE: who would wear this? (nurses, teachers, dog moms, hikers, etc.) — only if unmistakably clear from design elements\n"
+        "- THEME/OCCASION: hobby, holiday, profession, lifestyle — only if clear\n"
+        "- CULTURAL/ETHNIC IDENTITY: if the design clearly expresses a specific cultural or ethnic identity (e.g. Hispanic, Latino, Latina, Mexican, Irish, Italian, Black, African American, Asian, Korean, Japanese, Puerto Rican, etc.) through flags, symbols, text, or unmistakable cultural motifs — identify it explicitly. Do NOT infer ethnicity from skin color or ambiguous imagery.\n"
+        "Never invent details not visible in the image. Use 'unknown' if unclear.\n\n"
+
+        "=== STEP 2: SEO TITLE (100-140 chars, HARD MAX 140) ===\n"
+        "Structure: [Art Style] [Subject] [T-Shirt/Tee] | [Long-tail secondary keyword] | [Use case] | [Gift phrase]\n\n"
+        "TITLE RULES — follow strictly:\n"
+        "1. Lead with ART STYLE + SUBJECT for long-tail specificity (avoid generic openers like 'Graphic Tee' or 'Cute Shirt')\n"
+        "2. Prefer specific over generic: 'Engraving Style Mushroom Tee' beats 'Mushroom T-Shirt'\n"
+        "3. Use ' | ' to separate 3-4 keyword phrases naturally\n"
+        "4. NEVER add audience qualifiers ('for Women', 'for Men', 'for Him', 'for Her', 'for Girls', 'for Boys') unless the design EXPLICITLY depicts a gender-specific subject (e.g. clearly nurse uniform, mom/dad text, explicitly feminine character). A general animal, plant, skull, or abstract design does NOT justify audience language.\n"
+        "5. End with a gift phrase when it fits ('Birthday Gift Idea', 'Nature Lover Gift', 'Mom Gift')\n"
+        "6. Spell every word correctly — no missing letters, no abbreviations unless widely known\n"
+        "7. Count characters precisely: target 110-135 chars, never exceed 140\n"
+        "8. FORBIDDEN in title: DTF, unisex, printable, digital, download, wall art, poster\n"
+        "9. CULTURAL IDENTITY RULE: If a cultural/ethnic identity was detected in Step 1, it MUST appear in the title. Example: 'Retro Skull Mexican Heritage Tee | Dia de los Muertos Shirt | Latino Pride Gift'\n"
+        "10. POLITICAL/SARCASTIC TONE RULE: If the design has a political, satirical, or sarcastic tone (mocking a system, ironic commentary, protest humor, exaggerated social critique), the title MUST include 'Satire' or 'Sarcastic'. AVOID aggressive words like lunatic, crazy, stupid, idiot, moron — replace them with 'Satire' or 'Sarcastic' instead.\n"
+        "10b. RECOGNIZABLE REAL PERSON RULE: If the design features any recognizable real person — politician, athlete, musician, actor, influencer, or public figure — identifiable by face, name, number, signature symbol, or unmistakable visual trait:\n"
+        "    TITLE: Last name (or the most recognizable single name) is sufficient. Full name is not required in the title.\n"
+        "      Examples: 'Tsunoda Fan Tee', 'Hamilton 44 Shirt', 'Swift Aesthetic Tee', 'Trump Sarcastic Gift'\n"
+        "    TAGS: The person's FULL NAME ([First] [Last]) must appear in AT LEAST 1 tag, combined with a product or intent word.\n"
+        "      Format: '[first last] shirt', '[first last] fan gift', '[first last] tee'\n"
+        "      Examples by category:\n"
+        "        Athlete: 'yuki tsunoda shirt', 'yuki tsunoda fan gift'\n"
+        "        Musician: 'taylor swift shirt', 'taylor swift fan gift'\n"
+        "        Politician: 'donald trump shirt', 'trump satire gift'\n"
+        "        Actor: '[first last] fan shirt', '[first last] gift idea'\n"
+        "    Additionally include at least 1 more tag with just the last name + product word (e.g. 'tsunoda tee', 'hamilton shirt').\n"
+        "    Never replace the name with vague terms like 'political figure', 'famous athlete', or 'celebrity'.\n\n"
+        "10c. TONE ACCURACY RULE: The tone word in the title must reflect the design's ACTUAL INTENT, not its surface imagery.\n"
+        "    - Political figure + romantic symbol (heart, rose, kiss, love) = SARCASTIC or IRONIC intent, NOT romantic. Use: Sarcastic, Ironic, Satirical.\n"
+        "    - 'Romantic', 'Sweet', 'Lovely', 'Cute' are ONLY allowed when the design is genuinely romantic with no political, cynical, or ironic context.\n"
+        "    - When in doubt between romantic-looking and political/ironic, always choose the sarcastic framing.\n"
+        "11. DISNEY RULE: If the design contains ANY Disney universe visual element — including silhouettes, outlines, partial shapes (Minnie bow shape, Mickey ear circles, castle outline, etc.) — you MUST use the relevant Disney keywords in both the title and tags.\n"
+        "    Triggers: Minnie bow → 'minnie mouse'; Mickey ear circles → 'mickey mouse'; castle silhouette → 'disney', 'magic kingdom'; any recognizable Disney character shape.\n"
+        "    Do NOT avoid these terms when the design clearly warrants them, even if only a silhouette.\n"
+        "    Allowed keywords: disney, mickey mouse, minnie mouse, disneyland, disney world, magic kingdom, disney trip, disney birthday.\n\n"
+        "Title examples (no audience assumption for gender-neutral designs):\n"
+        "\"Vintage Engraving Mushroom T-Shirt | Cottagecore Forest Tee | Nature Lover Gift Idea\" (87 chars)\n"
+        "\"Retro Skeleton Halloween Shirt | Spooky Graphic Tee | Dark Halloween Gift Idea\" (79 chars)\n"
+        "\"Storybook Frog Wizard Tee | Whimsical Fantasy Graphic Shirt | Frog Lover Gift\" (79 chars)\n"
+        "\"Watercolor Floral Butterfly Shirt | Boho Garden Tee | Cottagecore Aesthetic Gift\" (81 chars)\n\n"
+
+        "=== STEP 3: EXACTLY 13 ETSY TAGS ===\n"
+        "Rules:\n"
+        "- Exactly 13 tags, each ≤20 chars, all lowercase, no duplicates\n"
+        "- Each tag must target a DIFFERENT search intent — do not repeat the same concept with minor wording changes\n"
+        "- Prefer 2-3 word phrases over single words (higher search specificity)\n"
+        "- Spell every tag correctly and completely — no truncated words\n"
+        f"- FORBIDDEN tags (never use any of these): {forbidden_str}\n"
+        "- Gender audience tags ('mens tshirt', 'womens tee', 'gift for him', 'gift for her') ONLY if the design unmistakably targets that gender. Otherwise use: 'birthday gift', '[subject] lover gift', '[subject] fan gift'.\n\n"
+        "Cover these 7 intent categories across your 13 tags:\n"
+        "1. SUBJECT+PRODUCT (2 tags): e.g. 'mushroom shirt', 'mushroom tee'\n"
+        "2. STYLE+PRODUCT (2 tags): e.g. 'vintage graphic tee', 'cottagecore shirt'\n"
+        "3. PURCHASE INTENT (2 tags): e.g. 'birthday gift', '[subject] lover gift'\n"
+        "4. THEME/OCCASION (2 tags): e.g. 'halloween shirt', 'nature lover tee'\n"
+        "5. PRODUCT TYPE (2 tags): e.g. 'graphic tee', 'novelty shirt'\n"
+        "6. LONG-TAIL SPECIFIC (2 tags): the most specific possible phrase ≤20 chars, e.g. 'cottagecore mushroom'\n"
+        "7. STYLE AESTHETIC (1 tag): e.g. 'cottagecore aesthetic', 'dark academia'\n"
+        "CULTURAL IDENTITY RULE: If a cultural/ethnic identity was detected, include AT LEAST 2 tags that reference it directly. Examples: 'hispanic heritage', 'latino shirt', 'irish pride tee', 'mexican heritage'. These replace 2 slots from the categories above.\n"
+        "PROFESSION RULE: If the design clearly depicts a profession or role (nurse, teacher, doctor, firefighter, paramedic, police, engineer, etc.), include AT LEAST 3 tags that directly target that profession using these formats: '[profession] appreciation', '[profession] gift idea', '[profession] shirt'. These replace 3 slots from the categories above.\n\n"
+
+        "=== OUTPUT — strict JSON only, no markdown, no extra text ===\n"
+        "{\"text_detected\":\"none\",\"text_content\":\"\","
+        "\"detected_subjects\":[],\"style_detected\":\"\",\"title\":\"\",\"tags\":[],"
+        "\"primary_color\":\"\",\"secondary_color\":\"\",\"occasion\":\"\",\"holiday\":\"\","
+        "\"graphic\":\"\",\"reasoning\":\"\"}\n"
+        "text_detected: 'none', 'readable', or 'partially_readable'.\n"
+        "text_content: the extracted or best-guess text; empty string if none.\n"
+        "style_detected: if text was partially_readable, append ' (text partially readable: <your guess>)' to the style string.\n"
+        "reasoning: 2-3 sentences explaining why you chose these specific keywords, style label, and gift angle."
+    )
+    if prior_issues:
+        issues_block = "\n".join(f"  - {i}" for i in prior_issues)
+        base = (
+            f"⚠️ PREVIOUS ATTEMPT HAD THESE ISSUES — fix all of them in your new output:\n{issues_block}\n\n"
+            + base
+        )
+    return base
+
+
+
+
+
+def _call_openai(payload: dict[str, Any], api_key: str) -> dict[str, Any]:
+    with httpx.Client(timeout=90.0) as client:
+        resp = client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+        )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _parse_seo_response(parsed: dict[str, Any]) -> dict[str, Any]:
+    """Turn a raw GPT JSON dict into a normalized seo fields dict."""
+    out = _default_seo_fields()
+    if not isinstance(parsed, dict):
+        return _fallback_seo_fields()
+    if str(parsed.get("error") or "").strip().lower() == "invalid_output":
+        return _fallback_seo_fields()
+
+    raw_title = str(parsed.get("title") or parsed.get("seo_title") or "").strip()
+    raw_tags_list = parsed.get("tags") or parsed.get("seo_tags") or []
+
+    raw_detected_list = parsed.get("detected_subjects") or []
+    if not isinstance(raw_detected_list, list):
+        raw_detected_list = []
+    detected_subjects = [str(x).strip() for x in raw_detected_list if isinstance(x, str) and str(x).strip()]
+
+    clean_title = _remove_hallucinated_subject_terms(raw_title, detected_subjects)
+    out["seo_title"] = _normalize_seo_title(clean_title)
+
+    raw_tags = _normalize_seo_tags(raw_tags_list)
+    cleaned_tags = [_remove_hallucinated_subject_terms(t, detected_subjects) for t in raw_tags]
+    out["seo_tags"] = _filter_forbidden_tags(_normalize_seo_tags(cleaned_tags))[:_ETSY_TAG_MAX_COUNT]
+
+    if len(out["seo_tags"]) < _ETSY_TAG_MAX_COUNT:
+        filler_seed = [
+            out["seo_title"],
+            str(parsed.get("graphic") or ""),
+            str(parsed.get("occasion") or ""),
+            str(parsed.get("holiday") or ""),
+            "shirt design", "graphic tee",
+        ]
+        for tag in _filter_forbidden_tags(_fallback_etsy_tags([x for x in filler_seed if x], out["seo_title"])):
+            if tag not in out["seo_tags"]:
+                out["seo_tags"].append(tag)
+            if len(out["seo_tags"]) >= _ETSY_TAG_MAX_COUNT:
+                break
+
+    out["primary_color"] = str(parsed.get("primary_color") or "").strip()
+    out["secondary_color"] = str(parsed.get("secondary_color") or "").strip()
+    out["occasion"] = str(parsed.get("occasion") or "").strip()
+    out["holiday"] = str(parsed.get("holiday") or "").strip()
+    out["graphic"] = str(parsed.get("graphic") or "").strip()
+    out["style_detected"] = str(parsed.get("style_detected") or "").strip()
+    out["reasoning"] = str(parsed.get("reasoning") or "").strip()[:600]
+    # Store GPT's actual detected subjects so self-check can use them (not derived from title)
+    out["detected_subjects_raw"] = detected_subjects
+    raw_text_detected = str(parsed.get("text_detected") or "none").strip().lower()
+    out["text_detected"] = raw_text_detected if raw_text_detected in ("readable", "partially_readable") else "none"
+    out["text_content"] = str(parsed.get("text_content") or "").strip()[:200]
+    out["needs_text_input"] = out["text_detected"] == "partially_readable" and not out["text_content"]
+
+    out["seo_title"] = _expand_seo_title_if_too_short(
+        out["seo_title"],
+        tags=out["seo_tags"],
+        primary_color=out["primary_color"],
+        secondary_color=out["secondary_color"],
+        occasion=out["occasion"],
+        holiday=out["holiday"],
+        graphic=out["graphic"],
+    )
+    out["seo_tags"] = _normalize_seo_tags(out.get("seo_tags") or [])
+    return out
+
+
+def _selfcheck_seo_output(
+    title: str,
+    tags: list[str],
+    style_detected: str,
+    detected_subjects: list[str],
+    api_key: str,
+    model: str,
+) -> list[str]:
+    """Returns list of issues found; empty list = OK."""
+    forbidden_str = ", ".join(sorted(_FORBIDDEN_TAG_TERMS))
+    subjects_str = ", ".join(detected_subjects) if detected_subjects else "unknown"
+    tags_str = ", ".join(tags)
+    check_prompt = (
+        "You are a strict quality checker for Etsy t-shirt SEO listings.\n\n"
+        f"LISTING:\n"
+        f"Title: {title}\n"
+        f"Tags: {tags_str}\n"
+        f"Detected art style: {style_detected}\n"
+        f"Detected subjects: {subjects_str}\n\n"
+        "CHECK THESE 4 ISSUES:\n\n"
+        "1. AUDIENCE ASSUMPTION: Does the title contain phrases like 'for Women', 'for Men', 'for Girls', 'for Boys', 'for Him', 'for Her'?\n"
+        "   These are ONLY valid if detected_subjects clearly includes a gender-specific element (nurse, mom, dad, explicitly feminine/masculine character).\n"
+        "   If the design is gender-neutral (mushroom, skull, animal, coffee, abstract), flag it.\n\n"
+        "2. FORBIDDEN TAGS: Check every tag against this list:\n"
+        f"   FORBIDDEN TERMS: {forbidden_str}\n"
+        "   A tag is forbidden if it CONTAINS any of the above terms as whole words — exact match, prefix, suffix, or embedded.\n"
+        "   Examples: 'graphic t shirt' is forbidden → 'bold graphic t shirt' is ALSO forbidden (contains it).\n"
+        "   'novelty tee' is forbidden → 'funny novelty tee' is ALSO forbidden.\n"
+        "   'cute shirt' is forbidden → 'super cute shirt' is ALSO forbidden.\n"
+        "   Check substring containment, not just exact match. Flag the full tag and which forbidden term it contains.\n\n"
+        "3. SPELLING & TRUNCATION — check EVERY word in every tag and the title:\n"
+        "   a) TRUNCATED WORDS: Is any word cut off mid-spelling? Examples of bad: 'tshir', 'tshi', 'vintagee', 'graphi', 'apprec', 'birtday', 'hallowee', 'aestheti', 'character te' (where 'te' is a truncated 'tee'). Flag the exact bad word and what it should be.\n"
+        "   b) DOUBLED LETTERS: Does any word end with an unintended repeated letter? Examples: 'shirtt', 'vintagee', 'tshirtt'. Flag it.\n"
+        "   c) RUN-TOGETHER WORDS: Are words incorrectly joined without a space? Examples: 'birthdaygift' → 'birthday gift', 'mushromshirt' → 'mushroom shirt'. Flag it.\n"
+        "   d) REAL-WORD CHECK: Is every word a real English word or a known proper noun? Single letters alone (except 'a') or 2-letter fragments that aren't real words must be flagged.\n"
+        "   e) TAG LENGTH: Every tag must be ≤20 characters. If a tag is 21+ characters, flag it — even if it looks like a real word.\n"
+        "   f) TRUNCATED ENDING: If a tag ends with a 1-2 character fragment that appears to be a cut-off word (e.g. tag ending in '...m', '...si', '...ti', '...ae'), flag it as truncated.\n"
+        "   Quote the EXACT problematic word in your issue description.\n\n"
+        "4. TONE MISMATCH: Does the detected style conflict with the tags?\n"
+        "   Examples of mismatches: vintage/retro style + 'funny gift'; dark/gothic style + 'cute shirt'; minimalist style + 'maximalist'.\n\n"
+        "5. CULTURAL IDENTITY: If the detected subjects clearly include a cultural/ethnic identity (Hispanic, Latino, Irish, Asian, Mexican, etc.), verify that:\n"
+        "   a) The title includes the cultural identity term.\n"
+        "   b) At least 2 tags directly reference that cultural identity.\n"
+        "   Flag if either condition is missing.\n\n"
+        "6. PROFESSION RULE: If the detected subjects include a profession or role (nurse, teacher, doctor, firefighter, etc.), verify that at least 3 tags use profession-specific formats: '[profession] appreciation', '[profession] gift idea', '[profession] shirt'. Flag if fewer than 3 such tags are present.\n\n"
+        "7. POLITICAL/SARCASTIC TONE: If the design has a political, satirical, or sarcastic tone, verify that the title contains 'Satire' or 'Sarcastic'. Also flag if the title or tags contain aggressive words like lunatic, crazy, stupid, idiot, moron — these must be replaced.\n"
+        "   TONE ACCURACY: If the detected subjects include a political figure combined with romantic symbols (heart, rose, kiss, love), the title must use 'Sarcastic', 'Ironic', or 'Satirical' — NOT 'Romantic', 'Sweet', or 'Lovely'. Flag any title that uses romantic tone words on a clearly political/ironic design.\n"
+        "   RECOGNIZABLE REAL PERSON: If the detected subjects include any recognizable real person (politician, athlete, musician, actor, etc.), verify:\n"
+        "   a) The title contains at least the person's last name (or most recognizable name). Full name not required in title.\n"
+        "   b) At least 1 tag contains the person's FULL NAME ([First Last]) combined with a product/intent word (e.g. 'yuki tsunoda shirt', 'taylor swift fan gift').\n"
+        "   c) At least 1 additional tag uses just the last name + product word (e.g. 'tsunoda tee', 'hamilton shirt').\n"
+        "   Flag if any of these conditions are missing.\n\n"
+        "8. DISNEY KEYWORDS: Check whether ANY of the following appears in detected_subjects OR style_detected OR the title/tags themselves:\n"
+        "   Disney indicators: disney, mickey, minnie, mouse ears, mickey ears, minnie bow, magic kingdom, disneyland, disney world, disney castle, cinderella castle, tinkerbell, stitch, goofy, donald duck, pluto, elsa, moana, simba\n"
+        "   If ANY indicator is found in detected_subjects or style_detected (even as a silhouette, outline, or partial reference), verify:\n"
+        "   a) At least one Disney keyword (disney, mickey mouse, minnie mouse, disneyland, disney world, magic kingdom, disney trip, disney birthday) appears in the title.\n"
+        "   b) At least 2 Disney-related tags are present.\n"
+        "   IMPORTANT: Silhouettes and outlines count. 'minnie silhouette', 'minnie bow', 'mickey ears outline' all trigger this check.\n"
+        "   Flag specifically which Disney indicator was found and which condition is missing.\n\n"
+        "Return strict JSON only:\n"
+        "{\"ok\": true} — no issues\n"
+        "{\"ok\": false, \"issues\": [\"specific issue 1\", \"specific issue 2\"]} — issues found\n"
+        "Be specific in issue descriptions so they can be fixed."
+    )
+    payload = {
+        "model": model,
+        "temperature": 0,
+        "max_completion_tokens": 500,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": "Return only strict JSON. No markdown, no explanation."},
+            {"role": "user", "content": check_prompt},
+        ],
+    }
+    try:
+        data = _call_openai(payload, api_key)
+        txt = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        result = json.loads(txt) if isinstance(txt, str) else {}
+        if not isinstance(result, dict):
+            return []
+        if result.get("ok") is True:
+            return []
+        issues = result.get("issues") or []
+        return [str(i) for i in issues if i][:8]
+    except Exception:
+        return []
+
+
+_KNOWN_TAG_CORRECTIONS: dict[str, str] = {
+    "tshir": "tshirt", "tshi": "tshirt", "tsh": "tshirt",
+    "vintagee": "vintage", "vintag": "vintage",
+    "graphi": "graphic", "graph": "graphic",
+    "apprec": "appreciation", "appreciat": "appreciation",
+    "birtday": "birthday", "birthda": "birthday",
+    "hallowee": "halloween", "hallowe": "halloween",
+    "christma": "christmas", "christm": "christmas",
+    "aestheti": "aesthetic", "aesthet": "aesthetic",
+    "cottageor": "cottagecore", "cottagecor": "cottagecore",
+    "minimalst": "minimalist", "minimalis": "minimalist",
+}
+
+_SHORT_WORD_WHITELIST: set[str] = {
+    "tee", "tees", "top", "dad", "mom", "rn", "md", "pa", "er", "ed",
+    "go", "do", "so", "no", "art", "fan", "fun", "new", "old", "big",
+}
+
+
+def _detect_tag_typos(tags: list[str], title: str) -> list[str]:
+    """Fast, API-free check for obvious truncations and typos in tags and title."""
+    issues: list[str] = []
+    all_texts = [("tag", t) for t in tags] + [("title", title)]
+    for source, text in all_texts:
+        words = re.findall(r"[a-z']+", text.lower())
+        for word in words:
+            # Truncation: matches a known bad prefix
+            for bad, correction in _KNOWN_TAG_CORRECTIONS.items():
+                if word == bad:
+                    issues.append(
+                        f"Truncated word in {source}: '{word}' — should be '{correction}'"
+                    )
+                    break
+            # Suspiciously short standalone word
+            if len(word) <= 2 and word not in _SHORT_WORD_WHITELIST:
+                issues.append(
+                    f"Suspiciously short/incomplete word in {source}: '{word}'"
+                )
+            # Trailing doubled letter (vintagee, shirtt, tshirtt)
+            if len(word) >= 4 and word[-1] == word[-2] and word[:-1] in _KNOWN_TAG_CORRECTIONS.values():
+                issues.append(
+                    f"Double-letter typo in {source}: '{word}' — likely '{word[:-1]}'"
+                )
+    return issues
+
+
+def _run_seo_generation_once(
+    image_ref: str,
+    model: str,
+    api_key: str,
+    prior_issues: list[str],
+    text_hint: str = "",
+) -> dict[str, Any]:
+    prompt_text = _build_seo_prompt(prior_issues, text_hint=text_hint)
+    payload = {
+        "model": model,
+        "temperature": 0.3,
+        "max_completion_tokens": 1000,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are an Etsy SEO specialist. Return only strict JSON output, no markdown, no explanation.",
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt_text},
+                    {"type": "image_url", "image_url": {"url": image_ref, "detail": "auto"}},
+                ],
+            },
+        ],
+    }
+    try:
+        data = _call_openai(payload, api_key)
+        txt = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        parsed = json.loads(txt) if isinstance(txt, str) else {}
+    except Exception as exc:
+        raise RuntimeError(f"GPT analiz hatası: {exc}")
+    return _parse_seo_response(parsed)
+
+
+def _analyze_design_for_seo(design_path: Path, text_hint: str = "") -> dict[str, Any]:
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY bulunamadı.")
@@ -1041,134 +1468,36 @@ def _analyze_design_for_seo(design_path: Path) -> dict[str, Any]:
     else:
         image_b64 = base64.b64encode(image_bytes).decode("ascii")
         image_ref = f"data:{mime};base64,{image_b64}"
-    prompt_text = (
-        "You are an Etsy SEO generator for DTF printed physical t-shirts.\n"
-        "CORE CONTEXT:\n"
-        "- Product is always a physical t-shirt\n"
-        "- Printing method is DTF (Direct to Film)\n"
-        "- Not a digital product, not wall art, not poster, not printable\n"
-        "TWO-STAGE SYSTEM:\n"
-        "STEP 1 (image analysis): detect main subject, style, and theme from visible elements only.\n"
-        "Do not guess. If unclear, use \"unknown\".\n"
-        "STEP 2 (SEO generation): generate Etsy SEO specifically for DTF printed t-shirts.\n"
-        "TITLE RULES:\n"
-        "- length target 100-130 chars (hard max 140)\n"
-        "- must include detected subject and \"t-shirt\" or \"tee\"\n"
-        "- should include style, audience, and use case when relevant\n"
-        "- must not include: printable, poster, wall art, digital download\n"
-        "TAG RULES:\n"
-        "- exactly 13 tags, each <=20 chars, unique\n"
-        "- include t-shirt-related tags such as tshirt, graphic tee, dtf shirt, printed shirt when relevant\n"
-        "- must not include: printable, wall art, poster, digital\n"
-        "- tags must be grounded in subject/style/audience from image\n"
-        "SUBJECT CONSISTENCY:\n"
-        "- title and tags must match detected subject; never change topic\n"
-        "HARD RULES:\n"
-        "- never return null\n"
-        "- seo_tags must always be an array of exactly 13 items\n"
-        "- if output includes unrelated concepts return {\"error\":\"invalid_output\"}\n"
-        "OUTPUT JSON ONLY (no explanation, no markdown):\n"
-        "{\"seo_title\":\"\",\"seo_tags\":[],\"primary_color\":\"\",\"secondary_color\":\"\",\"occasion\":\"\",\"holiday\":\"\",\"graphic\":\"\"}"
-    )
-    payload = {
-        "model": model,
-        "temperature": 0,
-        "max_tokens": 400,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {
-                "role": "system",
-                "content": "Return only strict JSON output.",
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt_text},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": image_ref,
-                            "detail": "low",
-                        },
-                    },
-                ],
-            },
-        ],
-    }
-    try:
-        with httpx.Client(timeout=90.0) as client:
-            resp = client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
-        resp.raise_for_status()
-        data = resp.json()
-        txt = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        parsed = json.loads(txt) if isinstance(txt, str) else {}
-    except Exception as exc:
-        raise RuntimeError(f"GPT analiz hatası: {exc}")
 
-    out = _default_seo_fields()
-    if not isinstance(parsed, dict):
-        return _fallback_seo_fields()
-    if str(parsed.get("error") or "").strip().lower() == "invalid_output":
-        return _fallback_seo_fields()
-    if parsed.get("seo_tags") is None:
-        parsed["seo_tags"] = []
-    raw_detected = parsed.get("detected_subjects")
-    raw_detected_list = raw_detected if isinstance(raw_detected, list) else []
-    detected_subjects = [
-        str(x).strip()
-        for x in raw_detected_list
-        if isinstance(x, str) and str(x).strip()
-    ]
-    clean_title = _remove_hallucinated_subject_terms(
-        str(parsed.get("seo_title") or ""),
-        detected_subjects,
-    )
-    out["seo_title"] = _normalize_seo_title(clean_title)
-    raw_tags = _normalize_seo_tags(parsed.get("seo_tags") or [])
-    cleaned_tags = [
-        _remove_hallucinated_subject_terms(tag, detected_subjects) for tag in raw_tags
-    ]
-    out["seo_tags"] = _normalize_seo_tags(cleaned_tags)
-    if len(out["seo_tags"]) < _ETSY_TAG_MAX_COUNT:
-        filler_seed = [
-            out["seo_title"],
-            str(parsed.get("graphic") or ""),
-            str(parsed.get("occasion") or ""),
-            str(parsed.get("holiday") or ""),
-            str(parsed.get("primary_color") or ""),
-            str(parsed.get("secondary_color") or ""),
-            "shirt design",
-            "gift idea",
-            "trending design",
-        ]
-        fill_tags = _fallback_etsy_tags([x for x in filler_seed if x], out["seo_title"])
-        for tag in fill_tags:
-            if tag not in out["seo_tags"]:
-                out["seo_tags"].append(tag)
-            if len(out["seo_tags"]) >= _ETSY_TAG_MAX_COUNT:
-                break
-    out["primary_color"] = str(parsed.get("primary_color") or "").strip()
-    out["secondary_color"] = str(parsed.get("secondary_color") or "").strip()
-    out["occasion"] = str(parsed.get("occasion") or "").strip()
-    out["holiday"] = str(parsed.get("holiday") or "").strip()
-    out["graphic"] = str(parsed.get("graphic") or "").strip()
-    out["seo_title"] = _expand_seo_title_if_too_short(
-        out["seo_title"],
-        tags=out["seo_tags"],
-        primary_color=out["primary_color"],
-        secondary_color=out["secondary_color"],
-        occasion=out["occasion"],
-        holiday=out["holiday"],
-        graphic=out["graphic"],
-    )
-    out["seo_tags"] = _normalize_seo_tags(out.get("seo_tags") or [])
+    prior_issues: list[str] = []
+    out: dict[str, Any] = {}
+    for attempt in range(1, 3):
+        out = _run_seo_generation_once(image_ref, model, api_key, prior_issues, text_hint=text_hint)
+        # Fast code-level typo check (no API call)
+        typo_issues = _detect_tag_typos(out.get("seo_tags", []), out.get("seo_title", ""))
+        if typo_issues:
+            out["attempt_count"] = attempt
+            out["selfcheck_issues"] = typo_issues
+            prior_issues = typo_issues
+            if attempt < 2:
+                continue
+            break
+        # Use GPT's actual detected subjects, not title-derived words
+        detected_subjects = out.get("detected_subjects_raw") or []
+        issues = _selfcheck_seo_output(
+            title=out.get("seo_title", ""),
+            tags=out.get("seo_tags", []),
+            style_detected=out.get("style_detected", ""),
+            detected_subjects=detected_subjects,
+            api_key=api_key,
+            model=model,
+        )
+        out["attempt_count"] = attempt
+        out["selfcheck_issues"] = issues
+        if not issues:
+            break
+        prior_issues = issues
+
     return out
 
 
@@ -1962,7 +2291,8 @@ async def workspace_analyze_design(
 
         if black_path is None or not black_path.is_file():
             raise RuntimeError("Black design dosyası bulunamadı. Dosyayı yükleyip tekrar deneyin.")
-        seo = _analyze_design_for_seo(black_path)
+        text_hint = str(draft.get("user_text_hint") or "").strip()
+        seo = _analyze_design_for_seo(black_path, text_hint=text_hint)
         draft["seo_title"] = str(seo.get("seo_title") or "").strip()[:140]
         draft["seo_tags"] = _normalize_seo_tags(seo.get("seo_tags"))
         draft["primary_color"] = str(seo.get("primary_color") or "").strip()
@@ -1970,14 +2300,25 @@ async def workspace_analyze_design(
         draft["occasion"] = str(seo.get("occasion") or "").strip()
         draft["holiday"] = str(seo.get("holiday") or "").strip()
         draft["graphic"] = str(seo.get("graphic") or "").strip()
+        draft["style_detected"] = str(seo.get("style_detected") or "").strip()
+        draft["reasoning"] = str(seo.get("reasoning") or "").strip()
+        draft["attempt_count"] = int(seo.get("attempt_count") or 1)
+        draft["selfcheck_issues"] = seo.get("selfcheck_issues") or []
+        draft["text_detected"] = str(seo.get("text_detected") or "none")
+        draft["text_content"] = str(seo.get("text_content") or "")
+        draft["needs_text_input"] = bool(seo.get("needs_text_input", False))
         if draft["seo_title"]:
             draft["title"] = draft["seo_title"]
         if draft["seo_tags"]:
             draft["tags"] = draft["seo_tags"][:_ETSY_TAG_MAX_COUNT]
         draft = _normalize_images_only_draft(draft)
+        attempt_count = draft["attempt_count"]
+        status_msg = f"SEO analizi tamamlandı ({attempt_count}. denemede)."
+        if draft.get("style_detected"):
+            status_msg += f" Stil: {draft['style_detected']}."
         return _redirect_workspace_state(
             {
-                "status": "SEO analizi tamamlandı.",
+                "status": status_msg,
                 "workspace_draft": draft,
             }
         )
