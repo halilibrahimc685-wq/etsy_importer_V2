@@ -62,6 +62,51 @@ _templates_dir = (Path(__file__).resolve().parent / "templates").resolve()
 templates = Jinja2Templates(directory=str(_templates_dir))
 
 
+def _cleanup_old_workspace_files(max_age_hours: int = 24) -> None:
+    """Delete workspace design files and generated mockup folders older than max_age_hours."""
+    _log = logging.getLogger("uvicorn.error")
+    cutoff = datetime.now().timestamp() - max_age_hours * 3600
+    deleted_files = 0
+    deleted_dirs = 0
+
+    # Clean old design files in _workspace_designs/
+    if WORKSPACE_DESIGNS_ROOT.is_dir():
+        for f in WORKSPACE_DESIGNS_ROOT.iterdir():
+            try:
+                if f.stat().st_mtime < cutoff:
+                    if f.is_file():
+                        f.unlink()
+                        deleted_files += 1
+                    elif f.is_dir():
+                        import shutil
+                        shutil.rmtree(f, ignore_errors=True)
+                        deleted_dirs += 1
+            except Exception:
+                pass
+
+    # Clean old batch folders in mockups_generated/_workspace/
+    if WORKSPACE_MOCKUPS_ROOT.is_dir():
+        for d in WORKSPACE_MOCKUPS_ROOT.iterdir():
+            try:
+                if d.is_dir() and d.stat().st_mtime < cutoff:
+                    import shutil
+                    shutil.rmtree(d, ignore_errors=True)
+                    deleted_dirs += 1
+            except Exception:
+                pass
+
+    if deleted_files or deleted_dirs:
+        _log.info(
+            "[cleanup] %d eski dosya ve %d eski klasör silindi (>%dh).",
+            deleted_files, deleted_dirs, max_age_hours,
+        )
+
+
+@app.on_event("startup")
+def _on_startup() -> None:
+    _cleanup_old_workspace_files(max_age_hours=24)
+
+
 @app.middleware("http")
 async def _log_unhandled_exceptions(
     request: Request, call_next: Callable[[Request], Awaitable[Any]]
@@ -879,6 +924,60 @@ def _generate_etsy_tags(keywords: list[str], title: str) -> tuple[list[str], str
     return fallback[:_ETSY_TAG_MAX_COUNT], "fallback"
 
 
+# Product-type tags — one is picked at random and appended after GPT generation.
+_PRODUCT_TYPE_TAGS: dict[str, list[str]] = {
+    "t-shirt":    ["unisex tshirt", "everyday tshirt"],
+    "cc t-shirt": ["comfort colors tshirt", "comfort colors gift"],
+    "cc long":    ["comfort colors long sleeve", "long sleeve gift"],
+    "sweatshirt": ["crewneck sweatshirt", "sweatshirt gift"],
+    "kids":       ["kids tshirt", "youth shirt", "gift for kids"],
+}
+
+# Title product-type word per mockup category (used in GPT prompt).
+_PRODUCT_TYPE_TITLE_WORD: dict[str, str] = {
+    "t-shirt":    "T-Shirt",
+    "cc t-shirt": "CC Shirt",
+    "cc long":    "CC Long Sleeve Shirt",
+    "sweatshirt": "Sweatshirt",
+    "kids":       "Kids Shirt",
+}
+
+_ETSY_TAG_TOTAL = 13
+
+
+def _get_product_type_tags(mockup_type: str) -> list[str]:
+    """Return 1 randomly selected product-type tag for the given mockup category."""
+    import random
+    key = (mockup_type or "").strip().lower()
+    tags = _PRODUCT_TYPE_TAGS.get(key)
+    return [random.choice(tags)] if tags else []
+
+
+def _get_product_type_title_word(mockup_type: str) -> str:
+    """Return the title product-type word for the given mockup category."""
+    key = (mockup_type or "").strip().lower()
+    return _PRODUCT_TYPE_TITLE_WORD.get(key, "")
+
+
+def _detect_mockup_type_from_urls(urls: list[str]) -> str:
+    """Infer mockup category from the folder name in selected template URLs.
+    E.g. '/media/mockups/CC%20Long/1.png' → 'CC Long'
+    """
+    from urllib.parse import unquote
+    known_keys = set(_PRODUCT_TYPE_TAGS.keys())  # lowercased
+    for url in urls:
+        parts = unquote(url).replace("\\", "/").split("/")
+        # Walk path parts to find a known category folder
+        for part in parts:
+            if part.strip().lower() in known_keys:
+                # Return with original casing from _PRODUCT_TYPE_TAGS
+                for key in _PRODUCT_TYPE_TAGS:
+                    if key == part.strip().lower():
+                        # Return the display name (capitalize properly)
+                        return part.strip()
+    return ""
+
+
 _FORBIDDEN_TAG_TERMS: set[str] = {
     "dtf", "dtf shirt", "dtf print", "dtf transfer", "dtf tee",
     "unisex", "unisex tee", "unisex shirt", "unisex t shirt",
@@ -889,14 +988,21 @@ _FORBIDDEN_TAG_TERMS: set[str] = {
     "everyday wear", "funny gift", "fun gift", "cool gift", "awesome tee",
     "pastel aesthetic", "novelty tee", "novelty shirt", "bear graphic tee",
     "humor aesthetic", "statement tshirt", "party joke shirt",
-    "bold graphic shirt", "bold graphic tee",
+    "bold graphic shirt", "bold graphic tee", "bold graphic",
     "bold graphic top", "bold top",
+    "racing top", "graphic top", "fan top", "sport top", "sports top",
+    "athletic top", "active top", "gym top", "training top", "workout top",
+    "printed top", "cool top", "funny top",
+    # Single-word filler tags that add no search value
+    "everyday", "daily", "casual", "lifestyle", "vibes", "outdoorsy",
 }
 
 # Regex-based forbidden patterns (for rules not expressible as simple terms).
 _FORBIDDEN_TAG_REGEXES: list[re.Pattern[str]] = [
     # Any tag ending with "aesthetic" when preceded by at least one word — "aesthetic" alone is allowed.
     re.compile(r"[a-z].+\baesthetic$"),
+    # Any tag ending with " top" when preceded by a generic descriptor word.
+    re.compile(r"\b(graphic|fan|racing|sport|sports|athletic|active|gym|training|workout|printed|cool|funny|bold|novelty|cute|casual|street|urban|retro|vintage|trendy|summer|festival)\s+top$"),
 ]
 
 
@@ -925,6 +1031,18 @@ def _tag_contains_forbidden(tag: str) -> bool:
 
 def _filter_forbidden_tags(tags: list[str]) -> list[str]:
     return [t for t in tags if not _tag_contains_forbidden(t)]
+
+
+def _filter_dangling_tags(tags: list[str]) -> list[str]:
+    """Remove tags that end with a dangling/preposition word — they were cut off mid-phrase."""
+    result = []
+    for tag in tags:
+        words = re.findall(r"[a-z']+", tag.lower())
+        last = words[-1] if words else ""
+        if last in _DANGLING_TAG_ENDINGS:
+            continue  # drop — e.g. "roaring bear with", "black crow holding"
+        result.append(tag)
+    return result
 
 
 def _default_seo_fields() -> dict[str, Any]:
@@ -1094,7 +1212,7 @@ def _remove_hallucinated_subject_terms(text: str, detected_subjects: list[str]) 
     return s
 
 
-def _build_seo_prompt(prior_issues: list[str], text_hint: str = "") -> str:
+def _build_seo_prompt(prior_issues: list[str], text_hint: str = "", mockup_type: str = "") -> str:
     forbidden_str = ", ".join(sorted(_FORBIDDEN_TAG_TERMS))
     text_hint_block = (
         f"USER-PROVIDED TEXT HINT: The user has manually identified the following text in the design: \"{text_hint.strip()}\". "
@@ -1126,16 +1244,19 @@ def _build_seo_prompt(prior_issues: list[str], text_hint: str = "") -> str:
         "Never invent details not visible in the image. Use 'unknown' if unclear.\n\n"
 
         "=== STEP 2: SEO TITLE (100-140 chars, HARD MAX 140) ===\n"
-        "Structure: [Art Style] [Subject] [T-Shirt/Tee] | [Long-tail secondary keyword] | [Use case] | [Gift phrase]\n\n"
+        "Structure: [Subject/Niche] [Art Style] [T-Shirt/Tee] | [Long-tail secondary keyword] | [Use case] | [Gift phrase]\n\n"
         "TITLE RULES — follow strictly:\n"
-        "1. Lead with ART STYLE + SUBJECT for long-tail specificity (avoid generic openers like 'Graphic Tee' or 'Cute Shirt')\n"
-        "2. Prefer specific over generic: 'Engraving Style Mushroom Tee' beats 'Mushroom T-Shirt'\n"
+        "1. FIRST WORD RULE: The title MUST open with the highest-search-volume keyword for the design's main subject or niche — never a style descriptor.\n"
+        "   WRONG openers: Bold, Retro, Funny, Cute, Vintage, Aesthetic, Cool, Unique, Trendy, Quirky, Colorful, Stylish, Amazing\n"
+        "   CORRECT openers: the actual subject or niche (e.g. 'Ratatouille', 'Mushroom', 'Skeleton', 'Nurse', 'Graduation', 'Stitch', 'Trump')\n"
+        "   The art/style word may follow the subject: 'Mushroom Retro Tee' ✓ — 'Retro Mushroom Tee' ✗\n"
+        "2. Prefer specific over generic: 'Mushroom Engraving Style Tee' beats 'Mushroom T-Shirt'\n"
         "3. Use ' | ' to separate 3-4 keyword phrases naturally\n"
         "4. NEVER add audience qualifiers ('for Women', 'for Men', 'for Him', 'for Her', 'for Girls', 'for Boys') unless the design EXPLICITLY depicts a gender-specific subject (e.g. clearly nurse uniform, mom/dad text, explicitly feminine character). A general animal, plant, skull, or abstract design does NOT justify audience language.\n"
         "5. End with a gift phrase when it fits ('Birthday Gift Idea', 'Nature Lover Gift', 'Mom Gift')\n"
         "6. Spell every word correctly — no missing letters, no abbreviations unless widely known\n"
         "7. Count characters precisely: target 110-135 chars, never exceed 140\n"
-        "8. FORBIDDEN in title: DTF, unisex, printable, digital, download, wall art, poster\n"
+        "8. FORBIDDEN in title: DTF, unisex, printable, digital, download, wall art, poster, bold graphic, graphic tee, graphic shirt, novelty, everyday, casual, lifestyle\n"
         "9. CULTURAL IDENTITY RULE: If a cultural/ethnic identity was detected in Step 1, it MUST appear in the title. Example: 'Retro Skull Mexican Heritage Tee | Dia de los Muertos Shirt | Latino Pride Gift'\n"
         "10. POLITICAL/SARCASTIC TONE RULE: If the design has a political, satirical, or sarcastic tone (mocking a system, ironic commentary, protest humor, exaggerated social critique), the title MUST include 'Satire' or 'Sarcastic'. AVOID aggressive words like lunatic, crazy, stupid, idiot, moron — replace them with 'Satire' or 'Sarcastic' instead.\n"
         "10b. RECOGNIZABLE REAL PERSON RULE: If the design features any recognizable real person — politician, athlete, musician, actor, influencer, or public figure — identifiable by face, name, number, signature symbol, or unmistakable visual trait:\n"
@@ -1154,19 +1275,39 @@ def _build_seo_prompt(prior_issues: list[str], text_hint: str = "") -> str:
         "    - Political figure + romantic symbol (heart, rose, kiss, love) = SARCASTIC or IRONIC intent, NOT romantic. Use: Sarcastic, Ironic, Satirical.\n"
         "    - 'Romantic', 'Sweet', 'Lovely', 'Cute' are ONLY allowed when the design is genuinely romantic with no political, cynical, or ironic context.\n"
         "    - When in doubt between romantic-looking and political/ironic, always choose the sarcastic framing.\n"
-        "11. DISNEY RULE: If the design contains ANY Disney universe visual element — including silhouettes, outlines, partial shapes (Minnie bow shape, Mickey ear circles, castle outline, etc.) — you MUST use the relevant Disney keywords in both the title and tags.\n"
-        "    Triggers: Minnie bow → 'minnie mouse'; Mickey ear circles → 'mickey mouse'; castle silhouette → 'disney', 'magic kingdom'; any recognizable Disney character shape.\n"
-        "    Do NOT avoid these terms when the design clearly warrants them, even if only a silhouette.\n"
-        "    Allowed keywords: disney, mickey mouse, minnie mouse, disneyland, disney world, magic kingdom, disney trip, disney birthday.\n\n"
-        "Title examples (no audience assumption for gender-neutral designs):\n"
-        "\"Vintage Engraving Mushroom T-Shirt | Cottagecore Forest Tee | Nature Lover Gift Idea\" (87 chars)\n"
-        "\"Retro Skeleton Halloween Shirt | Spooky Graphic Tee | Dark Halloween Gift Idea\" (79 chars)\n"
-        "\"Storybook Frog Wizard Tee | Whimsical Fantasy Graphic Shirt | Frog Lover Gift\" (79 chars)\n"
-        "\"Watercolor Floral Butterfly Shirt | Boho Garden Tee | Cottagecore Aesthetic Gift\" (81 chars)\n\n"
+        "11. DISNEY/PIXAR RULE: If the design contains ANY Disney or Pixar universe visual element — including silhouettes, outlines, partial shapes — you MUST use the relevant character name AND film/franchise name in both the title and tags.\n"
+        "    CRITICAL STUDIO DISTINCTION — Disney and Pixar are DIFFERENT studios. Use the correct tag:\n"
+        "      'disney' ONLY (NOT 'disney pixar'): Mickey, Minnie, Goofy, Donald Duck, Pluto, Tinkerbell, Lilo, Stitch, Moana, Encanto/Mirabel, Frozen/Elsa/Anna/Olaf, Lion King/Simba, Tangled/Rapunzel, Little Mermaid/Ariel, Cinderella, Sleeping Beauty, Snow White.\n"
+        "      'disney pixar' (Pixar films): Toy Story/Woody/Buzz, Finding Nemo/Dory, Ratatouille/Remy, Monsters Inc/Sully, The Incredibles, Up/Carl/Russell, Brave/Merida, Inside Out/Joy/Sadness, Coco/Miguel, Turning Red/Mei, Elemental/Ember, Cars/Lightning McQueen, WALL-E, A Bug's Life.\n"
+        "    NEVER tag a Disney-only character (e.g. Stitch, Moana, Elsa) with 'disney pixar'. NEVER tag a Pixar character with just 'disney'.\n"
+        "    Classic Disney triggers: Minnie bow → 'minnie mouse' + 'disney'; Mickey ears → 'mickey mouse' + 'disney'; castle silhouette → 'disney', 'magic kingdom'.\n"
+        "    Lilo & Stitch → 'stitch' + 'lilo and stitch' + 'disney' (NOT disney pixar)\n"
+        "    Do NOT avoid these terms when the design clearly warrants them, even if only a silhouette or outline.\n"
+        "    REQUIRED in title: film/franchise name + character name (e.g. 'Stitch Lilo Disney Shirt', 'Remy Ratatouille Pixar Tee').\n"
+        "    REQUIRED in tags: film name tag, character name tag, correct studio tag ('disney' or 'disney pixar').\n\n"
+        "Title examples — subject/niche always FIRST, style word second:\n"
+        "\"Mushroom Vintage Engraving T-Shirt | Cottagecore Forest Tee | Nature Lover Gift Idea\" (85 chars)\n"
+        "\"Skeleton Retro Halloween Shirt | Spooky Dark Tee | Halloween Gift Idea\" (71 chars)\n"
+        "\"Frog Wizard Storybook Tee | Whimsical Fantasy Shirt | Frog Lover Gift\" (70 chars)\n"
+        "\"Butterfly Watercolor Floral Shirt | Boho Garden Tee | Cottagecore Gift Idea\" (76 chars)\n"
+        "\"Graduation Class Dismissed Shirt | Senior 2025 Tee | Funny Grad Gift Idea\" (75 chars)\n"
+        "\"Nurse Appreciation Retro Tee | RN Life Shirt | Nurse Gift Idea\" (62 chars)\n\n"
 
-        "=== STEP 3: EXACTLY 13 ETSY TAGS ===\n"
+        + (
+            f"PRODUCT TYPE: This design will be printed on a '{mockup_type}'. "
+            f"Use '{_get_product_type_title_word(mockup_type)}' as the product type word in the title (e.g. 'Mushroom Retro {_get_product_type_title_word(mockup_type)} | ...'). "
+            f"Do NOT use generic words like 'T-Shirt', 'Tee', 'Shirt', 'Top' unless the product type word above already contains them. "
+            + ("In tags, NEVER use 'tee' or 'top' — use 'sweatshirt' instead whenever referencing the product. "
+               if mockup_type.lower() == "sweatshirt" else
+               "In tags, prefer 'long sleeve' over 'tee' when referencing the product type. "
+               if mockup_type.lower() == "cc long" else "")
+            + "Do NOT generate any product-type tag (e.g. unisex tshirt, long sleeve tshirt, comfort colors) — one will be added automatically. "
+            + "Generate exactly 12 tags instead of 13.\n\n"
+            if mockup_type and _get_product_type_tags(mockup_type) else ""
+        )
+        + f"=== STEP 3: EXACTLY {12 if mockup_type and _get_product_type_tags(mockup_type) else 13} ETSY TAGS ===\n"
         "Rules:\n"
-        "- Exactly 13 tags, each ≤20 chars, all lowercase, no duplicates\n"
+        f"- Exactly {12 if mockup_type and _get_product_type_tags(mockup_type) else 13} tags, each ≤20 chars, all lowercase, no duplicates\n"
         "- Each tag must target a DIFFERENT search intent — do not repeat the same concept with minor wording changes\n"
         "- Prefer 2-3 word phrases over single words (higher search specificity)\n"
         "- Spell every tag correctly and completely — no truncated words\n"
@@ -1206,12 +1347,16 @@ def _build_seo_prompt(prior_issues: list[str], text_hint: str = "") -> str:
 
 
 def _call_openai(payload: dict[str, Any], api_key: str) -> dict[str, Any]:
+    _log = logging.getLogger("uvicorn.error")
+    _log.info("[OpenAI] model=%s max_completion_tokens=%s", payload.get("model"), payload.get("max_completion_tokens"))
     with httpx.Client(timeout=90.0) as client:
         resp = client.post(
             "https://api.openai.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json=payload,
         )
+    _log.info("[OpenAI] status=%s", resp.status_code)
+    _log.info("[OpenAI] full_response=%s", resp.text[:2000])
     resp.raise_for_status()
     return resp.json()
 
@@ -1237,7 +1382,12 @@ def _parse_seo_response(parsed: dict[str, Any]) -> dict[str, Any]:
 
     raw_tags = _normalize_seo_tags(raw_tags_list)
     cleaned_tags = [_remove_hallucinated_subject_terms(t, detected_subjects) for t in raw_tags]
-    out["seo_tags"] = _filter_forbidden_tags(_normalize_seo_tags(cleaned_tags))[:_ETSY_TAG_MAX_COUNT]
+    # Apply char limit BEFORE forbidden check so truncated forms are also caught
+    truncated_tags = [_normalize_tag_phrase(t) for t in cleaned_tags if t]
+    filtered = _filter_forbidden_tags([t for t in truncated_tags if t])
+    # Drop any tags that end with a dangling word (cut-off phrases) — runs after forbidden so
+    # normalization already happened and short forms like "roaring bear with" are still caught.
+    out["seo_tags"] = _filter_dangling_tags(filtered)[:_ETSY_TAG_MAX_COUNT]
 
     if len(out["seo_tags"]) < _ETSY_TAG_MAX_COUNT:
         filler_seed = [
@@ -1332,13 +1482,17 @@ def _selfcheck_seo_output(
         "   b) At least 1 tag contains the person's FULL NAME ([First Last]) combined with a product/intent word (e.g. 'yuki tsunoda shirt', 'taylor swift fan gift').\n"
         "   c) At least 1 additional tag uses just the last name + product word (e.g. 'tsunoda tee', 'hamilton shirt').\n"
         "   Flag if any of these conditions are missing.\n\n"
-        "8. DISNEY KEYWORDS: Check whether ANY of the following appears in detected_subjects OR style_detected OR the title/tags themselves:\n"
-        "   Disney indicators: disney, mickey, minnie, mouse ears, mickey ears, minnie bow, magic kingdom, disneyland, disney world, disney castle, cinderella castle, tinkerbell, stitch, goofy, donald duck, pluto, elsa, moana, simba\n"
-        "   If ANY indicator is found in detected_subjects or style_detected (even as a silhouette, outline, or partial reference), verify:\n"
-        "   a) At least one Disney keyword (disney, mickey mouse, minnie mouse, disneyland, disney world, magic kingdom, disney trip, disney birthday) appears in the title.\n"
-        "   b) At least 2 Disney-related tags are present.\n"
-        "   IMPORTANT: Silhouettes and outlines count. 'minnie silhouette', 'minnie bow', 'mickey ears outline' all trigger this check.\n"
-        "   Flag specifically which Disney indicator was found and which condition is missing.\n\n"
+        "8. DISNEY/PIXAR KEYWORDS: Check whether ANY of the following appears in detected_subjects OR style_detected OR the title/tags themselves:\n"
+        "   Disney-ONLY indicators (tag must be 'disney', NEVER 'disney pixar'): mickey, minnie, mouse ears, mickey ears, minnie bow, magic kingdom, disneyland, disney world, castle, cinderella, tinkerbell, stitch, lilo, goofy, donald duck, pluto, moana, encanto, mirabel, luisa, frozen, elsa, anna, olaf, simba, lion king, rapunzel, ariel, little mermaid\n"
+        "   Pixar indicators (tag must be 'disney pixar'): remy, ratatouille, nemo, dory, finding nemo, woody, buzz, buzz lightyear, toy story, miguel, coco, carl, russell, up, brave, merida, inside out, joy, sadness, monsters inc, sully, mike wazowski, incredibles, violet, dash, turning red, mei, elemental, ember, wade, lightning mcqueen, cars, wall-e\n"
+        "   CRITICAL STUDIO CHECK: If a Disney-only character (Stitch, Moana, Elsa, Simba, etc.) is detected, flag any tag containing 'disney pixar' — it must be just 'disney'. If a Pixar character (Remy, Woody, Nemo, etc.) is detected, flag if studio tag is only 'disney' without 'pixar'.\n"
+        "   If ANY indicator is found, verify ALL of the following:\n"
+        "   a) The title contains BOTH the character name AND the film/franchise name.\n"
+        "   b) At least 1 tag contains the character's name.\n"
+        "   c) At least 1 tag contains the film/franchise name.\n"
+        "   d) Studio tag is correct: 'disney' for Disney-only, 'disney pixar' for Pixar films.\n"
+        "   IMPORTANT: Silhouettes and outlines count. Any partial or stylized reference triggers this check.\n"
+        "   Flag specifically which character/film was detected and which condition (a/b/c/d) is missing.\n\n"
         "Return strict JSON only:\n"
         "{\"ok\": true} — no issues\n"
         "{\"ok\": false, \"issues\": [\"specific issue 1\", \"specific issue 2\"]} — issues found\n"
@@ -1387,6 +1541,14 @@ _SHORT_WORD_WHITELIST: set[str] = {
 }
 
 
+# Tags ending with these words are likely truncated (phrase expects more after them)
+_DANGLING_TAG_ENDINGS: set[str] = {
+    "holding", "wearing", "with", "and", "of", "in", "on", "by", "for",
+    "the", "a", "an", "to", "from", "at", "into", "about", "carrying",
+    "sitting", "standing", "flying", "running", "looking", "featuring",
+}
+
+
 def _detect_tag_typos(tags: list[str], title: str) -> list[str]:
     """Fast, API-free check for obvious truncations and typos in tags and title."""
     issues: list[str] = []
@@ -1411,6 +1573,21 @@ def _detect_tag_typos(tags: list[str], title: str) -> list[str]:
                 issues.append(
                     f"Double-letter typo in {source}: '{word}' — likely '{word[:-1]}'"
                 )
+        # Tag-level check: dangling word at end implies truncation
+        if source == "tag":
+            last_word = words[-1] if words else ""
+            if last_word in _DANGLING_TAG_ENDINGS:
+                issues.append(
+                    f"Incomplete/truncated tag '{text}' — ends with '{last_word}' which suggests it was cut off"
+                )
+        # Title-level check: scan for forbidden terms in the title
+        if source == "title":
+            tl = text.lower()
+            for term in _FORBIDDEN_TAG_TERMS:
+                if re.search(r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])", tl):
+                    issues.append(
+                        f"Forbidden term '{term}' found in title — remove or replace it"
+                    )
     return issues
 
 
@@ -1420,8 +1597,9 @@ def _run_seo_generation_once(
     api_key: str,
     prior_issues: list[str],
     text_hint: str = "",
+    mockup_type: str = "",
 ) -> dict[str, Any]:
-    prompt_text = _build_seo_prompt(prior_issues, text_hint=text_hint)
+    prompt_text = _build_seo_prompt(prior_issues, text_hint=text_hint, mockup_type=mockup_type)
     payload = {
         "model": model,
         "temperature": 0.3,
@@ -1450,7 +1628,7 @@ def _run_seo_generation_once(
     return _parse_seo_response(parsed)
 
 
-def _analyze_design_for_seo(design_path: Path, text_hint: str = "") -> dict[str, Any]:
+def _analyze_design_for_seo(design_path: Path, text_hint: str = "", mockup_type: str = "") -> dict[str, Any]:
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY bulunamadı.")
@@ -1472,7 +1650,7 @@ def _analyze_design_for_seo(design_path: Path, text_hint: str = "") -> dict[str,
     prior_issues: list[str] = []
     out: dict[str, Any] = {}
     for attempt in range(1, 3):
-        out = _run_seo_generation_once(image_ref, model, api_key, prior_issues, text_hint=text_hint)
+        out = _run_seo_generation_once(image_ref, model, api_key, prior_issues, text_hint=text_hint, mockup_type=mockup_type)
         # Fast code-level typo check (no API call)
         typo_issues = _detect_tag_typos(out.get("seo_tags", []), out.get("seo_title", ""))
         if typo_issues:
@@ -1497,6 +1675,17 @@ def _analyze_design_for_seo(design_path: Path, text_hint: str = "") -> dict[str,
         if not issues:
             break
         prior_issues = issues
+
+    # Append product-type tags after GPT generation (they don't count toward GPT's budget)
+    product_tags = _get_product_type_tags(mockup_type)
+    if product_tags:
+        gpt_tags = out.get("seo_tags") or []
+        # Remove any GPT-generated tags that duplicate product type tags
+        product_tags_set = set(t.lower() for t in product_tags)
+        gpt_tags = [t for t in gpt_tags if t.lower() not in product_tags_set]
+        # Trim GPT tags to make guaranteed room for product tags
+        gpt_tags = gpt_tags[:(_ETSY_TAG_TOTAL - len(product_tags))]
+        out["seo_tags"] = gpt_tags + product_tags
 
     return out
 
@@ -1550,7 +1739,138 @@ def _public_image_fetch_url(url: str) -> str:
     return u
 
 
-def _upload_images_best_effort(listing_id: int, images: list[Any]) -> str:
+_MOCKUP_SLUG_STOPWORDS: set[str] = {
+    "t-shirt", "tshirt", "tee", "shirt", "top", "the", "a", "an", "and",
+    "for", "to", "of", "in", "on", "at", "with", "by", "from", "is",
+    "it", "my", "me", "i", "your", "our", "gift", "idea", "ideas",
+}
+
+# Words that signal style/aesthetic — used to enrich rank-1 slug
+_MOCKUP_STYLE_WORDS: set[str] = {
+    "retro", "vintage", "funny", "cute", "aesthetic", "bold", "minimalist",
+    "classic", "cool", "trendy", "boho", "groovy", "whimsical", "kawaii",
+    "silly", "sarcastic", "witty", "humorous", "quirky", "cottagecore",
+    "colorful", "pastel", "dark", "floral", "abstract",
+}
+
+# Words that signal occasion / scenario — used for rank-3 slug
+_MOCKUP_SCENARIO_WORDS: set[str] = {
+    "birthday", "christmas", "halloween", "thanksgiving", "easter", "holiday",
+    "teacher", "nurse", "doctor", "mom", "dad", "sister", "brother",
+    "friend", "coworker", "colleague", "student", "graduation", "wedding",
+    "summer", "fall", "autumn", "winter", "spring", "beach", "camping",
+    "hiking", "travel", "coffee", "wine", "cat", "dog", "mama", "grandma",
+    "grandpa", "valentines", "mothers", "fathers",
+}
+
+# Product type words to pull from tags for rank-2 slug
+_MOCKUP_PRODUCT_WORDS: set[str] = {
+    "sweatshirt", "hoodie", "crewneck", "pullover", "sleeve", "comfort",
+}
+
+
+def _mockup_slug_for_rank(seo_title: str, tags: list[str], rank: int) -> str:
+    """Return a unique keyword-combination slug based on the image rank position.
+
+    rank 1 → main topic + style words        (e.g. "mushroom-retro-forest")
+    rank 2 → secondary segment + product     (e.g. "nature-lover-sweatshirt")
+    rank 3 → occasion/scenario + niche       (e.g. "birthday-gift-mushroom")
+    rank 4+ → gift prefix + main topic       (e.g. "gift-mushroom-lover")
+    """
+    stop = _MOCKUP_SLUG_STOPWORDS
+
+    def clean(text: str) -> list[str]:
+        # Strip apostrophes first so "don't" → "dont" (not "don" + "t")
+        text = re.sub(r"[''`']", "", text.lower())
+        return [
+            w.strip("-")
+            for w in re.sub(r"[^\w\s-]", " ", text).split()
+            if len(w.strip("-")) > 1 and w.strip("-") not in stop
+        ]
+
+    segments = re.split(r"[|—–]", seo_title) if seo_title else [""]
+    seg1 = clean(segments[0]) if segments else []
+    seg2 = clean(segments[1]) if len(segments) > 1 else []
+
+    # Flatten all tag words, deduplicated against seg1; exclude scenario/occasion words entirely
+    seen_tw: set[str] = set(seg1)
+    tag_words: list[str] = []
+    for tag in (tags or []):
+        for w in clean(tag):
+            if w not in seen_tw and w not in _MOCKUP_SCENARIO_WORDS:
+                seen_tw.add(w)
+                tag_words.append(w)
+
+    # Also exclude scenario words from seg1 (title may mention "birthday" etc.)
+    style     = [w for w in seg1 + tag_words if w in _MOCKUP_STYLE_WORDS]
+    product   = [w for w in tag_words if w in _MOCKUP_PRODUCT_WORDS]
+    main      = [w for w in seg1
+                 if w not in _MOCKUP_STYLE_WORDS
+                 and w not in _MOCKUP_PRODUCT_WORDS
+                 and w not in _MOCKUP_SCENARIO_WORDS]
+    secondary = [
+        w for w in tag_words
+        if w not in _MOCKUP_STYLE_WORDS
+        and w not in _MOCKUP_PRODUCT_WORDS
+    ]
+
+    if rank == 1:
+        # main topic + style
+        parts = main[:3] + style[:2]
+        if not parts:
+            parts = seg1[:5]
+    elif rank == 2:
+        # secondary segment or tag words + product type
+        base = seg2[:3] if seg2 else secondary[:3]
+        parts = base + product[:2]
+        if not parts:
+            parts = tag_words[:5]
+    elif rank == 3:
+        # design-secondary: non-title tag keywords (no scenario, no gift)
+        non_gift_secondary = [w for w in secondary if w not in {"gift", "gifts", "present"}]
+        parts = non_gift_secondary[:5]
+        if not parts:
+            parts = seg2[:3] + secondary[:2]
+        if not parts:
+            parts = seg1[1:5] or seg1[:5]
+    else:
+        # gift + main topic
+        parts = ["gift"] + main[:4]
+        if len(parts) <= 1:
+            parts = ["gift"] + seg1[:4]
+
+    parts = [p for p in parts if p][:5]
+    return "-".join(parts) if parts else "design"
+
+
+def _mockup_filename_for_upload(
+    seo_title: str,
+    image_url: str,
+    tags: list[str] | None = None,
+    rank: int = 1,
+) -> str:
+    """Build a rank-varied renamed mockup filename.
+
+    Each image in a listing gets a different keyword combination so filenames
+    are not repetitive and cover more SEO surface area.
+    Example (rank 1): mushroom-retro-forest-1.png
+    Example (rank 2): nature-lover-sweatshirt-2.png
+    """
+    slug = _mockup_slug_for_rank(seo_title, tags or [], rank)
+    path = Path(image_url.split("?")[0])
+    original_stem = path.stem  # e.g. "1", "12"
+    ext = path.suffix.lower() or ".jpg"
+    if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+        ext = ".jpg"
+    return f"{slug}-{original_stem}{ext}"
+
+
+def _upload_images_best_effort(
+    listing_id: int,
+    images: list[Any],
+    seo_title: str = "",
+    tags: list[str] | None = None,
+) -> str:
     uploaded = 0
     failed = 0
     seen: set[str] = set()
@@ -1564,10 +1884,15 @@ def _upload_images_best_effort(listing_id: int, images: list[Any]) -> str:
         seen.add(url)
         try:
             fetch_url = _public_image_fetch_url(url)
-            upload_listing_image_from_url(listing_id, fetch_url, rank=rank, overwrite=True)
+            filename = (
+                _mockup_filename_for_upload(seo_title, url, tags=tags, rank=rank)
+                if seo_title
+                else None
+            )
+            upload_listing_image_from_url(listing_id, fetch_url, rank=rank, overwrite=True, filename=filename)
             uploaded += 1
             rank += 1
-        except Exception as ex:
+        except Exception:
             failed += 1
     if uploaded == 0 and failed > 0:
         return "Görsel yüklenemedi."
@@ -2186,7 +2511,11 @@ def workspace_set_mockups_dir(mockups_dir: str = Form("")) -> HTMLResponse:
 
 
 @app.post("/workspace/download-selected-mockups")
-def workspace_download_selected_mockups(selected_urls: str = Form("[]")) -> Response:
+def workspace_download_selected_mockups(
+    selected_urls: str = Form("[]"),
+    seo_title: str = Form(""),
+    tags_json: str = Form("[]"),
+) -> Response:
     try:
         raw = json.loads(selected_urls or "[]")
     except Exception:
@@ -2210,24 +2539,38 @@ def workspace_download_selected_mockups(selected_urls: str = Form("[]")) -> Resp
         rk = _workspace_r2_key_from_media_url(item)
         if rk and rk not in seen:
             seen.add(rk)
-            r2_pairs.append((rk, _workspace_r2_zip_arcname(item)))
+            r2_pairs.append((rk, item))  # store original url for naming
     if not files and not r2_pairs:
         raise HTTPException(status_code=400, detail="Indirilecek secili mockup bulunamadi.")
+
+    title = seo_title.strip()
+    try:
+        dl_tags = json.loads(tags_json or "[]")
+        if not isinstance(dl_tags, list):
+            dl_tags = []
+        dl_tags = [str(t).strip() for t in dl_tags if t]
+    except Exception:
+        dl_tags = []
     buf = io.BytesIO()
     bucket = (os.environ.get("S3_BUCKET") or "").strip()
     client = _r2_client() if r2_pairs else None
+    img_rank = 1
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for p in files:
-            try:
-                rel = p.resolve().relative_to(WORKSPACE_MOCKUPS_ROOT.resolve()).as_posix()
-            except ValueError:
-                rel = p.name
-            zf.write(p, arcname=rel)
+            arcname = _mockup_filename_for_upload(title, p.name, tags=dl_tags, rank=img_rank) if title else p.name
+            zf.write(p, arcname=arcname)
+            img_rank += 1
         if client and bucket:
-            for s3_key, arc in r2_pairs:
+            for s3_key, original_url in r2_pairs:
+                arcname = (
+                    _mockup_filename_for_upload(title, original_url, tags=dl_tags, rank=img_rank)
+                    if title
+                    else _workspace_r2_zip_arcname(original_url)
+                )
                 try:
                     body = client.get_object(Bucket=bucket, Key=s3_key)["Body"].read()
-                    zf.writestr(arc, body)
+                    zf.writestr(arcname, body)
+                    img_rank += 1
                 except Exception:
                     logging.getLogger("uvicorn.error").exception(
                         "Zip R2 okuma basarisiz key=%s", s3_key
@@ -2292,7 +2635,11 @@ async def workspace_analyze_design(
         if black_path is None or not black_path.is_file():
             raise RuntimeError("Black design dosyası bulunamadı. Dosyayı yükleyip tekrar deneyin.")
         text_hint = str(draft.get("user_text_hint") or "").strip()
-        seo = _analyze_design_for_seo(black_path, text_hint=text_hint)
+        # Detect mockup type from generated image URLs (most reliable) — fallback to draft field
+        all_image_urls = [str(u) for u in (draft.get("images") or []) if u]
+        mockup_type = _detect_mockup_type_from_urls(all_image_urls) or str(draft.get("mockup_type") or "").strip()
+        draft["mockup_type"] = mockup_type  # persist for tab restore
+        seo = _analyze_design_for_seo(black_path, text_hint=text_hint, mockup_type=mockup_type)
         draft["seo_title"] = str(seo.get("seo_title") or "").strip()[:140]
         draft["seo_tags"] = _normalize_seo_tags(seo.get("seo_tags"))
         draft["primary_color"] = str(seo.get("primary_color") or "").strip()
@@ -2438,7 +2785,7 @@ def workspace_publish(
                 status += f" | {len(tags)} tag eklendi"
             _save_app_draft_listing(listing_id=listing_id, draft=draft, price=price, mode="create")
 
-        status += " | " + _upload_images_best_effort(listing_id, images)
+        status += " | " + _upload_images_best_effort(listing_id, images, seo_title=seo_title, tags=tags)
 
         return _redirect_workspace_state(
             {

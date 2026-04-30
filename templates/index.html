@@ -165,6 +165,8 @@
 </form>
 <form id="form-studio-download-selected" method="post" action="/workspace/download-selected-mockups">
   <input type="hidden" name="selected_urls" id="st_selected_generated_urls" value="[]" />
+  <input type="hidden" name="seo_title" id="st_download_seo_title" value="" />
+  <input type="hidden" name="tags_json" id="st_download_tags_json" value="[]" />
 </form>
 <form id="form-st-analyze-seo" method="post" action="/workspace/analyze-design" enctype="multipart/form-data">
   <input type="hidden" id="st_draft_json_analyze" name="draft_json" value="{{ workspace_draft_json|default('{}')|e }}" />
@@ -429,6 +431,11 @@
       const selected = stGetSelectedGeneratedUrls();
       if (!selected.length) { alert('Lutfen en az bir üretilmiş mockup seçin.'); return false; }
       document.getElementById('st_selected_generated_urls').value = JSON.stringify(selected);
+      const titleEl = document.getElementById('st_seo_title');
+      document.getElementById('st_download_seo_title').value = titleEl ? (titleEl.value || '') : '';
+      // Pass current tags so download filenames get rank-varied slugs
+      const tagsRaw = Array.isArray(stDraft && stDraft.seo_tags) ? stDraft.seo_tags : [];
+      document.getElementById('st_download_tags_json').value = JSON.stringify(tagsRaw);
       document.getElementById('form-studio-download-selected').submit();
       return false;
     };
@@ -540,6 +547,14 @@
           setActive((t.getAttribute('data-category') || '').trim());
         });
       });
+      // Restore active tab from draft if available
+      const savedType = (stDraft && stDraft.mockup_type || '').trim();
+      if (savedType) {
+        const match = tabs.find(function(t) {
+          return (t.getAttribute('data-category') || '').trim() === savedType;
+        });
+        if (match) setActive(savedType);
+      }
     })();
 
     const generatedBox = document.getElementById('st-generated-editor');

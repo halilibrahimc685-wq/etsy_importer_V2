@@ -369,6 +369,7 @@ def upload_listing_image_from_url(
     shop_id: Optional[int] = None,
     rank: Optional[int] = None,
     overwrite: bool = False,
+    filename: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     URL'den görsel indirip listing'e yükler.
@@ -383,7 +384,8 @@ def upload_listing_image_from_url(
         img.raise_for_status()
         content_type = img.headers.get("content-type") or "image/jpeg"
 
-        files = {"image": ("image.jpg", img.content, content_type)}
+        upload_name = filename if filename else "image.jpg"
+        files = {"image": (upload_name, img.content, content_type)}
         data: dict[str, str] = {}
         if rank is not None:
             data["rank"] = str(rank)
