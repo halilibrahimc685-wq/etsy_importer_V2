@@ -1090,8 +1090,47 @@ def _normalize_seo_tags(values: Any) -> list[str]:
     return cleaned[:_ETSY_TAG_MAX_COUNT]
 
 
+def _fix_title_caps_for_etsy(title: str) -> str:
+    """Etsy rejects titles where >3 words start with 2+ sequential capital letters.
+
+    Strategy: convert any fully-uppercase word with 3+ chars to Title Case.
+    2-char abbreviations (CC, LA, NY) are kept as-is.
+    If after that conversion we still have >3 caps-starting words, convert the
+    2-char ones to Title Case as well.
+    """
+    def starts_with_two_caps(w: str) -> bool:
+        stripped = re.sub(r"[^A-Za-z]", "", w)
+        return len(stripped) >= 2 and stripped[:2].isupper()
+
+    words = title.split(" ")
+
+    # First pass: convert 3+ char ALL-CAPS words to Title Case
+    fixed: list[str] = []
+    for w in words:
+        alpha = re.sub(r"[^A-Za-z]", "", w)
+        if len(alpha) >= 3 and alpha.isupper():
+            # Capitalise only the alpha part, preserve surrounding punctuation
+            fixed.append(w[0].upper() + w[1:].lower() if w else w)
+        else:
+            fixed.append(w)
+
+    # Second pass: if still >3 caps words, also title-case 2-char ones
+    if sum(1 for w in fixed if starts_with_two_caps(w)) > 3:
+        result: list[str] = []
+        for w in fixed:
+            alpha = re.sub(r"[^A-Za-z]", "", w)
+            if len(alpha) == 2 and alpha.isupper():
+                result.append(w[0].upper() + w[1:].lower() if w else w)
+            else:
+                result.append(w)
+        return " ".join(result)
+
+    return " ".join(fixed)
+
+
 def _normalize_seo_title(value: Any) -> str:
-    return str(value or "").strip()[:140]
+    title = str(value or "").strip()[:140]
+    return _fix_title_caps_for_etsy(title)
 
 
 def _expand_seo_title_if_too_short(
