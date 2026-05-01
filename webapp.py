@@ -32,6 +32,7 @@ from etsy_client import (
     create_draft_listing,
     normalize_listing_who_when_supply,
     update_existing_listing,
+    upload_listing_image_from_bytes,
     upload_listing_image_from_url,
 )
 from mockup_engine import (
@@ -1923,13 +1924,20 @@ def _upload_images_best_effort(
             continue
         seen.add(url)
         try:
-            fetch_url = _public_image_fetch_url(url)
             filename = (
                 _mockup_filename_for_upload(seo_title, url, tags=tags, rank=rank)
                 if seo_title
                 else None
             )
-            upload_listing_image_from_url(listing_id, fetch_url, rank=rank, overwrite=True, filename=filename)
+            # R2-stored images: fetch directly via boto3 to avoid HTTP loopback issues
+            r2_key = _workspace_r2_key_from_media_url(url)
+            if r2_key:
+                bucket = (os.environ.get("S3_BUCKET") or "").strip()
+                raw = _r2_client().get_object(Bucket=bucket, Key=r2_key)["Body"].read()
+                upload_listing_image_from_bytes(listing_id, raw, rank=rank, overwrite=True, filename=filename)
+            else:
+                fetch_url = _public_image_fetch_url(url)
+                upload_listing_image_from_url(listing_id, fetch_url, rank=rank, overwrite=True, filename=filename)
             uploaded += 1
             rank += 1
         except Exception as exc:

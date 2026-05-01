@@ -399,6 +399,51 @@ def delete_listing(listing_id: int, shop_id: Optional[int] = None) -> None:
         raise RuntimeError(f"Etsy delete listing {r.status_code}: {r.text}")
 
 
+def upload_listing_image_from_bytes(
+    listing_id: int,
+    raw_bytes: bytes,
+    shop_id: Optional[int] = None,
+    rank: Optional[int] = None,
+    overwrite: bool = False,
+    filename: Optional[str] = None,
+) -> dict[str, Any]:
+    """Ham bytes'ı işleyip listing'e yükler (R2'den direkt çekilen görseller için)."""
+    sid = shop_id if shop_id is not None else _env_int("ETSY_SHOP_ID", required=True)
+    token = os.environ.get("ETSY_ACCESS_TOKEN")
+    if not token:
+        raise RuntimeError("ETSY_ACCESS_TOKEN gerekli.")
+
+    processed_bytes, content_type = _prepare_image_for_etsy(raw_bytes)
+
+    if filename:
+        stem = filename.rsplit(".", 1)[0]
+        upload_name = stem + ".jpg"
+    else:
+        upload_name = "image.jpg"
+
+    files = {"image": (upload_name, processed_bytes, content_type)}
+    data: dict[str, str] = {}
+    if rank is not None:
+        data["rank"] = str(rank)
+    if overwrite:
+        data["overwrite"] = "1"
+
+    with httpx.Client(timeout=120.0) as client:
+        headers = _headers()
+        headers.pop("Content-Type", None)
+        r = _client_request(
+            client,
+            "POST",
+            f"{ETSY_API}/application/shops/{sid}/listings/{listing_id}/images",
+            headers=headers,
+            files=files,
+            data=data,
+        )
+    if r.status_code >= 400:
+        raise RuntimeError(f"Etsy görsel yükleme {r.status_code}: {r.text}")
+    return r.json()
+
+
 def upload_listing_image_from_url(
     listing_id: int,
     image_url: str,
@@ -419,7 +464,7 @@ def upload_listing_image_from_url(
         img = client.get(image_url)
         img.raise_for_status()
 
-        # Convert to 2000×2000 max, 85% quality JPEG before uploading
+        # Convert to 2000px wide, 85% quality JPEG before uploading
         processed_bytes, content_type = _prepare_image_for_etsy(img.content)
 
         # Always use .jpg extension since output is always JPEG
