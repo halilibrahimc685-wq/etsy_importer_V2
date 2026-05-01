@@ -1912,6 +1912,7 @@ def _upload_images_best_effort(
 ) -> str:
     uploaded = 0
     failed = 0
+    last_error = ""
     seen: set[str] = set()
     rank = 1
     for image in images:
@@ -1934,9 +1935,12 @@ def _upload_images_best_effort(
         except Exception as exc:
             _log = logging.getLogger("uvicorn.error")
             _log.exception("[upload] Görsel yüklenemedi url=%s hata=%s", url, exc)
+            last_error = str(exc)
             failed += 1
     if uploaded == 0 and failed > 0:
-        return "Görsel yüklenemedi."
+        return f"Görsel yüklenemedi: {last_error}"
+    if failed > 0:
+        return f"{uploaded} görsel yüklendi, {failed} başarısız: {last_error}"
     return f"{uploaded} görsel yüklendi."
 
 
