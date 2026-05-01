@@ -1892,7 +1892,9 @@ def _upload_images_best_effort(
             upload_listing_image_from_url(listing_id, fetch_url, rank=rank, overwrite=True, filename=filename)
             uploaded += 1
             rank += 1
-        except Exception:
+        except Exception as exc:
+            _log = logging.getLogger("uvicorn.error")
+            _log.exception("[upload] Görsel yüklenemedi url=%s hata=%s", url, exc)
             failed += 1
     if uploaded == 0 and failed > 0:
         return "Görsel yüklenemedi."

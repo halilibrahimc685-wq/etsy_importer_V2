@@ -7,10 +7,46 @@ görmek için exception mesajını aynen kullan.
 
 from __future__ import annotations
 
+import io
 import os
 from typing import Any, Optional
 
 import httpx
+from PIL import Image
+
+
+def _prepare_image_for_etsy(
+    raw_bytes: bytes,
+    target_width: int = 2000,
+    jpeg_quality: int = 85,
+) -> tuple[bytes, str]:
+    """Resize to target_width px wide (preserving aspect ratio) and encode as JPEG.
+
+    Returns (processed_bytes, content_type).
+    """
+    img = Image.open(io.BytesIO(raw_bytes))
+    # Convert palette/RGBA/P/LA modes to RGB so JPEG encoding works
+    if img.mode in ("RGBA", "LA"):
+        background = Image.new("RGB", img.size, (255, 255, 255))
+        background.paste(img, mask=img.split()[-1])
+        img = background
+    elif img.mode == "P":
+        img = img.convert("RGBA")
+        background = Image.new("RGB", img.size, (255, 255, 255))
+        background.paste(img, mask=img.split()[-1])
+        img = background
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+
+    # Resize to target_width, maintain aspect ratio
+    orig_w, orig_h = img.size
+    if orig_w != target_width:
+        new_h = round(orig_h * target_width / orig_w)
+        img = img.resize((target_width, new_h), Image.LANCZOS)
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+    return buf.getvalue(), "image/jpeg"
 
 
 ETSY_API = "https://api.etsy.com/v3"
@@ -382,10 +418,17 @@ def upload_listing_image_from_url(
     with httpx.Client(timeout=120.0, follow_redirects=True) as client:
         img = client.get(image_url)
         img.raise_for_status()
-        content_type = img.headers.get("content-type") or "image/jpeg"
 
-        upload_name = filename if filename else "image.jpg"
-        files = {"image": (upload_name, img.content, content_type)}
+        # Convert to 2000×2000 max, 85% quality JPEG before uploading
+        processed_bytes, content_type = _prepare_image_for_etsy(img.content)
+
+        # Always use .jpg extension since output is always JPEG
+        if filename:
+            stem = filename.rsplit(".", 1)[0]
+            upload_name = stem + ".jpg"
+        else:
+            upload_name = "image.jpg"
+        files = {"image": (upload_name, processed_bytes, content_type)}
         data: dict[str, str] = {}
         if rank is not None:
             data["rank"] = str(rank)
